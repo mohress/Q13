@@ -1,0 +1,6 @@
+{
+  "name": "AI Daily Task Planner & Thermal Printer",
+  "description": "An AI-powered daily task generator that schedules and formats daily plans into precise task lists, automatically sending them in real-time to BLE thermal printers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
