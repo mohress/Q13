@@ -55,6 +55,35 @@ export default function App() {
   const wakeLockRef = useRef<any>(null);
   const silentIntervalRef = useRef<any>(null);
 
+  // --- PWA Standalone Installation & WebView Bypass Guides ---
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [showInstallPrompt, setShowInstallPrompt] = useState<boolean>(false);
+  const [showPwaGuide, setShowPwaGuide] = useState<boolean>(false);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: any) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      setShowInstallPrompt(true);
+      console.log("PWA install prompt detected and deferred.");
+    };
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    };
+  }, []);
+
+  const triggerPwaInstallation = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === "accepted") {
+      setDeferredPrompt(null);
+      setShowInstallPrompt(false);
+      setSuccessMsg("تم تثبيت التطبيق بنجاح على شاشتك الرئيسية! ✓ يمكنك تشغيله الآن كأيقونة مستقلة وتوصيل البلوتوث.");
+    }
+  };
+
   // --- Screen Wake Lock implementation ---
   const handleToggleWakeLock = async () => {
     try {
@@ -432,7 +461,8 @@ export default function App() {
     try {
       const nav = navigator as any;
       if (!nav.bluetooth) {
-        throw new Error("متصفحك الحالي أو بيئة الإطار المعروضة لا تدعم تقنية Web Bluetooth. يرجى تفعيل البلوتوث واستخدام متصفح Chrome أو Edge.");
+        setShowPwaGuide(true);
+        throw new Error("متصفحك الحالي أو بيئة الـ WebView داخل الـ APK لا تدعم البلوتوث بسبب قيود الحماية لنظام أندرويد. تم فتح دليل التثبيت الذكي (PWA) بالأسفل لتشغيل البرنامج كتطبيق مستقل متكامل وبلوتوث يعمل 100%!");
       }
 
       // Request device with typical printer characteristics
@@ -1484,6 +1514,136 @@ export default function App() {
           {/* TAB 3: Printer Hub & Customizer */}
           {activeTab === "printer-hub" && (
             <div className="space-y-5 animate-fadeIn">
+
+              {/* PWA & WebView Troubleshooting Guide Card */}
+              <div className={`border rounded-3xl p-5 transition-all duration-300 ${
+                showPwaGuide 
+                  ? "bg-brand-50/70 border-brand-300 shadow-md ring-2 ring-brand-500/10" 
+                  : "bg-white border-slate-200 shadow-xs"
+              }`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className={`p-2 rounded-xl ${showPwaGuide ? "bg-brand-500 text-white animate-pulse" : "bg-slate-100 text-slate-500"}`}>
+                      <Info className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900">تشغيل البلوتوث عبر الهواتف الذكية</h4>
+                      <p className="text-[10px] text-slate-500 font-medium">دليل التثبيت الذكي وتجاوز قيود أنظمة التشغيل</p>
+                    </div>
+                  </div>
+                  
+                  <button
+                    onClick={() => setShowPwaGuide(!showPwaGuide)}
+                    className="text-[10px] font-bold text-brand-600 hover:text-brand-700 bg-brand-50 hover:bg-brand-100/80 px-2.5 py-1 rounded-lg transition-all"
+                  >
+                    {showPwaGuide ? "إخفاء التفاصيل" : "عرض الدليل"}
+                  </button>
+                </div>
+
+                <div className="mt-3.5 pt-3.5 border-t border-slate-200/60 space-y-3 font-sans">
+                  <div className="flex items-center justify-between bg-slate-50 border border-slate-150 p-2.5 rounded-xl text-[11px]">
+                    <span className="text-slate-500 font-medium">البيئة الحالية المكتشفة:</span>
+                    <span className={`font-bold flex items-center gap-1 ${
+                      !(navigator as any).bluetooth 
+                        ? "text-rose-600" 
+                        : "text-emerald-600"
+                    }`}>
+                      <span className={`w-2 h-2 rounded-full ${!(navigator as any).bluetooth ? "bg-rose-500 animate-pulse" : "bg-emerald-500"}`} />
+                      {!(navigator as any).bluetooth ? "تطبيق APK / WebView (البلوتوث محظور ⚠️)" : "متصفح يدعم البلوتوث (نشط ✦)"}
+                    </span>
+                  </div>
+
+                  {showPwaGuide && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="space-y-4"
+                    >
+                      <p className="text-[11px] text-slate-600 leading-relaxed">
+                        نظام أندرويد يحظر تشغيل الـ <strong>Web Bluetooth</strong> تماماً داخل متصفحات الـ WebView المدمجة في ملفات الـ APK لأسباب أمنية. لتشغيل الطابعة والاقتران بها بنجاح، يجب تشغيل التطبيق كـ <strong>تطبيق ويب تقدمي (PWA)</strong> عبر الخطوات البسيطة التالية:
+                      </p>
+
+                      <div className="bg-white border border-slate-150 rounded-2xl p-3.5 space-y-3">
+                        <h5 className="text-[11px] font-bold text-slate-800 flex items-center gap-1.5">
+                          <Zap className="w-3.5 h-3.5 text-brand-600" />
+                          <span>طريقة التثبيت المباشرة (خلال دقيقة واحدة):</span>
+                        </h5>
+
+                        <div className="space-y-3">
+                          {/* Step 1 */}
+                          <div className="flex items-start gap-2.5 text-[11.5px] text-slate-700">
+                            <span className="w-5 h-5 bg-brand-500 text-white rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">١</span>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-bold">انسخ رابط هذا الموقع المباشر:</p>
+                              <div className="flex items-center gap-1.5 mt-1 max-w-full">
+                                <code className="bg-slate-150 border border-slate-200 px-2 py-1 rounded-md font-mono text-[9px] text-slate-600 select-all truncate block">
+                                  {window.location.origin}
+                                </code>
+                                <button
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(window.location.origin);
+                                    setSuccessMsg("تم نسخ الرابط بنجاح! الصقه الآن في متصفح Chrome بهاتفك.");
+                                  }}
+                                  className="p-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md transition-all text-slate-500 shrink-0"
+                                  title="نسخ الرابط"
+                                >
+                                  <Copy className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Step 2 */}
+                          <div className="flex items-start gap-2.5 text-[11.5px] text-slate-700">
+                            <span className="w-5 h-5 bg-brand-500 text-white rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">٢</span>
+                            <div>
+                              <p className="font-bold">افتح متصفح Google Chrome أو Microsoft Edge على هاتفك والصق الرابط هناك.</p>
+                            </div>
+                          </div>
+
+                          {/* Step 3 */}
+                          <div className="flex items-start gap-2.5 text-[11.5px] text-slate-700">
+                            <span className="w-5 h-5 bg-brand-500 text-white rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">٣</span>
+                            <div>
+                              <p className="font-bold">اضغط على زر الخيارات (النقاط الثلاثة ⠇) أو أيقونة التحميل في شريط العنوان.</p>
+                            </div>
+                          </div>
+
+                          {/* Step 4 */}
+                          <div className="flex items-start gap-2.5 text-[11.5px] text-slate-700">
+                            <span className="w-5 h-5 bg-brand-500 text-white rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">٤</span>
+                            <div>
+                              <p className="font-bold">اختر <span className="text-brand-600 font-bold">"إضافة إلى الشاشة الرئيسية" (Add to Home Screen)</span> أو <span className="text-brand-600 font-bold">"تثبيت التطبيق" (Install App)</span>.</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Dynamic installation button if prompt is available */}
+                      {showInstallPrompt && deferredPrompt && (
+                        <motion.button
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          onClick={triggerPwaInstallation}
+                          className="w-full bg-gradient-to-r from-brand-600 to-emerald-600 hover:from-brand-700 hover:to-emerald-700 text-white font-bold text-xs py-3 px-4 rounded-xl shadow-md shadow-brand-500/10 transition-all flex items-center justify-center gap-2 active:scale-98"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>تثبيت كـ تطبيق مستقل ومباشر على الهاتف الآن</span>
+                        </motion.button>
+                      )}
+
+                      <div className="bg-emerald-50/50 border border-emerald-100 rounded-2xl p-3 text-[10.5px] text-slate-600 leading-relaxed">
+                        <strong className="text-emerald-800 font-bold block mb-1">💡 لماذا تطبيق الـ PWA أفضل من الـ APK؟</strong>
+                        <ul className="list-disc pr-3 space-y-1">
+                          <li>يعمل بملء الشاشة بالكامل وبشكل مستقل مثل أي تطبيق تم تنزيله.</li>
+                          <li><strong>يدعم البلوتوث والاقتران بالطابعة الحرارية بشكل كامل 100%</strong> دون أي قيود نظام أندرويد.</li>
+                          <li>يتلقى التحديثات والميزات الجديدة تلقائياً فور صدورها دون الحاجة لإعادة تنزيل ملفات APK.</li>
+                        </ul>
+                      </div>
+                    </motion.div>
+                  )}
+                </div>
+              </div>
               
               {/* Virtual Skeuomorphic Thermal Printer Live simulator */}
               <div className="bg-slate-50 border border-slate-200 rounded-3xl p-5 shadow-xs relative overflow-hidden flex flex-col items-center">

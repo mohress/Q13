@@ -1,0 +1,32 @@
+{
+  "short_name": "طابعة المهام",
+  "name": "طابعة المهام اليومية الذكية",
+  "description": "منسق وجدولة المهام اليومية تلقائياً وطباعتها فورياً على الطابعة الحرارية",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "512x512",
+      "purpose": "maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "display": "standalone",
+  "orientation": "portrait",
+  "categories": ["productivity", "utilities"],
+  "shortcuts": [
+    {
+      "name": "المهام اليومية",
+      "url": "/",
+      "icons": [{"src": "/icon.svg", "sizes": "any"}]
+    }
+  ]
+}

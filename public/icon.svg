@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+    <linearGradient id="brand" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="512" height="512" rx="128" fill="url(#bg)"/>
+  
+  <!-- Outer glowing ring -->
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="none" stroke="#10b981" stroke-width="4" opacity="0.15"/>
+  
+  <!-- Paper coming out -->
+  <path d="M176 110 h160 v120 h-160 Z" fill="#ffffff" rx="8" />
+  <!-- Printed text on paper (simulated) -->
+  <line x1="200" y1="140" x2="312" y2="140" stroke="#64748b" stroke-width="8" stroke-linecap="round" />
+  <line x1="200" y1="165" x2="280" y2="165" stroke="#64748b" stroke-width="8" stroke-linecap="round" />
+  <line x1="200" y1="190" x2="260" y2="190" stroke="#10b981" stroke-width="8" stroke-linecap="round" />
+
+  <!-- Printer Main Body -->
+  <rect x="128" y="200" width="256" height="190" rx="24" fill="#1e293b" stroke="#334155" stroke-width="12" />
+  
+  <!-- Printer Top Lid/Cutter -->
+  <path d="M128 200 h256 v40 h-256 Z" fill="#0f172a" stroke="#334155" stroke-width="8" />
+  
+  <!-- Paper exit slot -->
+  <rect x="160" y="222" width="192" height="10" rx="5" fill="#000000" />
+  
+  <!-- LED Status indicators -->
+  <circle cx="340" cy="330" r="10" fill="#10b981" />
+  <circle cx="340" cy="330" r="10" fill="#10b981" opacity="0.4" class="animate-pulse">
+    <animate attributeName="r" values="8;14;8" dur="2s" repeatCount="indefinite" />
+  </circle>
+  <circle cx="305" cy="330" r="10" fill="#f59e0b" />
+  
+  <!-- Feed Button -->
+  <rect x="170" y="315" width="45" height="30" rx="8" fill="#475569" stroke="#334155" stroke-width="4" />
+  <path d="M185 333 l7-7 l7 7" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+  
+  <!-- App text / Brand Accent -->
+  <text x="256" y="450" fill="#ffffff" font-family="system-ui, sans-serif" font-size="28" font-weight="bold" text-anchor="middle" letter-spacing="2">DAILY TASKS</text>
+  <text x="256" y="480" fill="#10b981" font-family="system-ui, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" letter-spacing="4">PRINTER</text>
+</svg>
