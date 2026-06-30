@@ -33,6 +33,8 @@ import {
   Eye
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { Capacitor } from "@capacitor/core";
+import { BleClient } from "@capacitor-community/bluetooth-le";
 import { Task, PrinterSettings, SimulatedReceipt } from "./types";
 import { 
   reverseArabicForPrinting, 
@@ -459,67 +461,142 @@ export default function App() {
     setSuccessMsg(null);
 
     try {
-      const nav = navigator as any;
-      if (!nav.bluetooth) {
-        setShowPwaGuide(true);
-        throw new Error("متصفحك الحالي أو بيئة الـ WebView داخل الـ APK لا تدعم البلوتوث بسبب قيود الحماية لنظام أندرويد. تم فتح دليل التثبيت الذكي (PWA) بالأسفل لتشغيل البرنامج كتطبيق مستقل متكامل وبلوتوث يعمل 100%!");
-      }
+      const isNative = Capacitor.isNativePlatform();
 
-      // Request device with typical printer characteristics
-      const device = await nav.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: [
-          "000018f0-0000-1000-8000-00805f9b34fb", // Standard ESC/POS
-          "0000ff00-0000-1000-8000-00805f9b34fb", // Goojprt / Paperang
-          "e7e1a000-012c-11e2-892e-0800200c9a66"  // Portable print service
-        ]
-      });
+      if (isNative) {
+        // --- 1. Capacitor Native Android Bluetooth Flow ---
+        await BleClient.initialize();
 
-      const server = await device.gatt?.connect();
-      if (!server) throw new Error("فشل الاتصال بجهاز GATT. تأكد من تشغيل الطابعة وقربها من الهاتف.");
+        // Request device via native BLE client
+        const device = await BleClient.requestDevice({
+          optionalServices: [
+            "000018f0-0000-1000-8000-00805f9b34fb", // Standard ESC/POS
+            "0000ff00-0000-1000-8000-00805f9b34fb", // Goojprt / Paperang
+            "e7e1a000-012c-11e2-892e-0800200c9a66"  // Portable print service
+          ]
+        });
 
-      const services = await server.getPrimaryServices();
-      let foundChar: any = null;
+        // Connect natively
+        await BleClient.connect(device.deviceId, () => {
+          // Unexpected Disconnection Callback
+          setBleDevice(null);
+          setBleCharacteristic(null);
+          setPrinterSettings(prev => ({
+            ...prev,
+            connected: false,
+            deviceName: null
+          }));
+          setError("انقطع الاتصال بالطابعة الحرارية اللاسلكية.");
+        });
 
-      // Scan characteristics to find writing permissions
-      for (const service of services) {
-        const chars = await service.getCharacteristics();
-        for (const char of chars) {
-          if (char.properties.write || char.properties.writeWithoutResponse) {
-            foundChar = char;
-            break;
+        // Discover services and characteristics
+        const services = await BleClient.getServices(device.deviceId);
+        let foundServiceUuid = "";
+        let foundCharUuid = "";
+
+        for (const service of services) {
+          if (service.characteristics) {
+            for (const char of service.characteristics) {
+              if (char.properties?.write || char.properties?.writeWithoutResponse) {
+                foundServiceUuid = service.uuid;
+                foundCharUuid = char.uuid;
+                break;
+              }
+            }
           }
+          if (foundCharUuid) break;
         }
-        if (foundChar) break;
-      }
 
-      if (!foundChar) {
-        throw new Error("تم الاقتران بنجاح، ولكن لم نعثر على قناة كتابة ESC/POS متوافقة مع الطابعة.");
-      }
+        if (!foundCharUuid) {
+          throw new Error("تم الاقتران بنجاح، ولكن لم نعثر على قناة كتابة ESC/POS متوافقة مع الطابعة.");
+        }
 
-      setBleDevice(device);
-      setBleCharacteristic(foundChar);
-      setPrinterSettings(prev => ({
-        ...prev,
-        connected: true,
-        deviceName: device.name || "طابعة BLE الحرارية"
-      }));
+        // Store Capacitor-specific references
+        setBleDevice({
+          deviceId: device.deviceId,
+          name: device.name || "طابعة BLE اللاسلكية",
+          isNative: true
+        });
+        setBleCharacteristic({
+          serviceUuid: foundServiceUuid,
+          characteristicUuid: foundCharUuid,
+          isNative: true
+        });
 
-      playSuccessChime();
-      setSuccessMsg(`تم بنجاح ربط واقتران الطابعة الحرارية: ${device.name || "BLE Printer"}`);
-      appendSystemSimulatorLog(`تم توصيل الطابعة الحرارية الحقيقية ✓\nالاسم المكتشف: ${device.name || "طابعة لاسلكية"}\nبروتوكول الاتصال: GATT Serial Write`);
-
-      // Add listener for unexpected disconnection
-      device.addEventListener("gattserverdisconnected", () => {
-        setBleDevice(null);
-        setBleCharacteristic(null);
         setPrinterSettings(prev => ({
           ...prev,
-          connected: false,
-          deviceName: null
+          connected: true,
+          deviceName: device.name || "طابعة BLE اللاسلكية"
         }));
-        setError("انقطع الاتصال بالطابعة الحرارية اللاسلكية.");
-      });
+
+        playSuccessChime();
+        setSuccessMsg(`تم بنجاح ربط واقتران الطابعة الحرارية (Capacitor Native): ${device.name || "طابعة BLE اللاسلكية"}`);
+        appendSystemSimulatorLog(`تم توصيل الطابعة الحرارية عبر الواجهة البرمجية الأصلية للأندرويد ✓\nالاسم المكتشف: ${device.name || "طابعة لاسلكية"}`);
+
+      } else {
+        // --- 2. Standard Web Browser Bluetooth Flow ---
+        const nav = navigator as any;
+        if (!nav.bluetooth) {
+          setShowPwaGuide(true);
+          throw new Error("متصفحك الحالي أو بيئة الـ WebView داخل الـ APK لا تدعم البلوتوث بسبب قيود الحماية لنظام أندرويد. تم فتح دليل التثبيت الذكي (PWA) بالأسفل لتشغيل البرنامج كتطبيق مستقل متكامل وبلوتوث يعمل 100%!");
+        }
+
+        // Request device with typical printer characteristics
+        const device = await nav.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [
+            "000018f0-0000-1000-8000-00805f9b34fb", // Standard ESC/POS
+            "0000ff00-0000-1000-8000-00805f9b34fb", // Goojprt / Paperang
+            "e7e1a000-012c-11e2-892e-0800200c9a66"  // Portable print service
+          ]
+        });
+
+        const server = await device.gatt?.connect();
+        if (!server) throw new Error("فشل الاتصال بجهاز GATT. تأكد من تشغيل الطابعة وقربها من الهاتف.");
+
+        const services = await server.getPrimaryServices();
+        let foundChar: any = null;
+
+        // Scan characteristics to find writing permissions
+        for (const service of services) {
+          const chars = await service.getCharacteristics();
+          for (const char of chars) {
+            if (char.properties.write || char.properties.writeWithoutResponse) {
+              foundChar = char;
+              break;
+            }
+          }
+          if (foundChar) break;
+        }
+
+        if (!foundChar) {
+          throw new Error("تم الاقتران بنجاح، ولكن لم نعثر على قناة كتابة ESC/POS متوافقة مع الطابعة.");
+        }
+
+        setBleDevice(device);
+        setBleCharacteristic(foundChar);
+        setPrinterSettings(prev => ({
+          ...prev,
+          connected: true,
+          deviceName: device.name || "طابعة BLE الحرارية"
+        }));
+
+        playSuccessChime();
+        setSuccessMsg(`تم بنجاح ربط واقتران الطابعة الحرارية: ${device.name || "BLE Printer"}`);
+        appendSystemSimulatorLog(`تم توصيل الطابعة الحرارية الحقيقية ✓\nالاسم المكتشف: ${device.name || "طابعة لاسلكية"}\nبروتوكول الاتصال: GATT Serial Write`);
+
+        // Add listener for unexpected disconnection
+        device.addEventListener("gattserverdisconnected", () => {
+          setBleDevice(null);
+          setBleCharacteristic(null);
+          setPrinterSettings(prev => ({
+            ...prev,
+            connected: false,
+            deviceName: null
+          }));
+          setError("انقطع الاتصال بالطابعة الحرارية اللاسلكية.");
+        });
+      }
 
     } catch (err: any) {
       console.error(err);
@@ -529,10 +606,19 @@ export default function App() {
     }
   };
 
-  const handleDisconnectBLE = () => {
-    if (bleDevice && bleDevice.gatt?.connected) {
-      bleDevice.gatt.disconnect();
+  const handleDisconnectBLE = async () => {
+    const isNative = Capacitor.isNativePlatform();
+
+    try {
+      if (isNative && bleDevice?.deviceId) {
+        await BleClient.disconnect(bleDevice.deviceId);
+      } else if (bleDevice && bleDevice.gatt?.connected) {
+        bleDevice.gatt.disconnect();
+      }
+    } catch (err) {
+      console.error("Disconnection error:", err);
     }
+
     setBleDevice(null);
     setBleCharacteristic(null);
     setPrinterSettings(prev => ({
@@ -547,11 +633,29 @@ export default function App() {
   // Write commands in safe 20-byte chunks
   const transmitBluetoothData = async (data: Uint8Array) => {
     if (!bleCharacteristic) return;
-    const size = 20;
-    for (let i = 0; i < data.length; i += size) {
-      const chunk = data.slice(i, i + size);
-      await bleCharacteristic.writeValue(chunk);
-      await new Promise(resolve => setTimeout(resolve, 35));
+    const isNative = Capacitor.isNativePlatform();
+
+    if (isNative && bleDevice?.deviceId) {
+      const size = 20;
+      for (let i = 0; i < data.length; i += size) {
+        const chunk = data.slice(i, i + size);
+        // Convert to DataView for Capacitor write
+        const chunkDataView = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        await BleClient.write(
+          bleDevice.deviceId,
+          bleCharacteristic.serviceUuid,
+          bleCharacteristic.characteristicUuid,
+          chunkDataView
+        );
+        await new Promise(resolve => setTimeout(resolve, 35));
+      }
+    } else {
+      const size = 20;
+      for (let i = 0; i < data.length; i += size) {
+        const chunk = data.slice(i, i + size);
+        await bleCharacteristic.writeValue(chunk);
+        await new Promise(resolve => setTimeout(resolve, 35));
+      }
     }
   };
 
