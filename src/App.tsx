@@ -35,13 +35,17 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { Capacitor } from "@capacitor/core";
 import { BleClient } from "@capacitor-community/bluetooth-le";
-import { Task, PrinterSettings, SimulatedReceipt } from "./types";
+import { Task, PrinterSettings, PrintedSlip } from "./types";
 import { 
   reverseArabicForPrinting, 
   buildEscPosReceipt, 
   shapeArabicText,
   convertToWindows1256
 } from "./utils/arabicShaper";
+import {
+  drawReceiptToCanvas,
+  convertCanvasToEscPosRaster
+} from "./utils/rasterPrinter";
 
 export default function App() {
   // --- 1. Core States ---
@@ -105,7 +109,7 @@ export default function App() {
         wakeLockRef.current = lock;
         setIsWakeLockActive(true);
         setSuccessMsg("تم تفعيل قفل اليقظة الفاخر! الشاشة ستظل نشطة باستمرار والبطارية في وضع يقظ ✓");
-        appendSystemSimulatorLog("تم تفعيل خاصية Web Wake Lock لمنع انطفاء الشاشة أو تجميد المعالج.");
+        appendSystemLogSlip("تم تفعيل خاصية Web Wake Lock لمنع انطفاء الشاشة أو تجميد المعالج.");
         
         lock.addEventListener('release', () => {
           setIsWakeLockActive(false);
@@ -157,7 +161,7 @@ export default function App() {
       silentIntervalRef.current = setInterval(playLoop, 1950);
       setIsSilentLoopActive(true);
       setSuccessMsg("تم تشغيل رادار اليقظة بالخلفية لمنع تجميد المجدول بنجاح ✓");
-      appendSystemSimulatorLog("تم تنشيط Background Audio Loop للتأكد من عدم تجميد العمليات عند قفل الشاشة.");
+      appendSystemLogSlip("تم تنشيط Background Audio Loop للتأكد من عدم تجميد العمليات عند قفل الشاشة.");
     } catch (e: any) {
       console.error(e);
       setError("فشل تفعيل رادار اليقظة الصوتية: " + e.message);
@@ -171,7 +175,7 @@ export default function App() {
     }
     setIsSilentLoopActive(false);
     setSuccessMsg("تم إيقاف رادار اليقظة الصوتية بنجاح.");
-    appendSystemSimulatorLog("تم إيقاف رادار اليقظة الصوتية (Background Audio Loop). قد يتجمد التطبيق إذا انطفأت الشاشة.");
+    appendSystemLogSlip("تم إيقاف رادار اليقظة الصوتية (Background Audio Loop). قد يتجمد التطبيق إذا انطفأت الشاشة.");
   };
 
   // Re-acquire Wake Lock when visibility changes
@@ -198,11 +202,8 @@ export default function App() {
     };
   }, []);
 
-  // --- 2. Clock & Time Machine States ---
+  // --- 2. Clock States (Real Actual Time Only) ---
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
-  const [isSimulatingTime, setIsSimulatingTime] = useState<boolean>(false);
-  const [simulatedHour, setSimulatedHour] = useState<number>(new Date().getHours());
-  const [simulatedMinute, setSimulatedMinute] = useState<number>(new Date().getMinutes());
 
   // --- 3. Printer State ---
   const [printerConnecting, setPrinterConnecting] = useState<boolean>(false);
@@ -217,15 +218,16 @@ export default function App() {
     headerText: "مهامي اليومية ✦",
     footerText: "عش يومك بشغف وإنجاز!",
     autoPrintOnlyHigh: false,
-    paperFeedLines: 4
+    paperFeedLines: 4,
+    printMode: "raster"
   });
 
   // GATT Write characteristic reference
   const [bleCharacteristic, setBleCharacteristic] = useState<any | null>(null);
   const [bleDevice, setBleDevice] = useState<any | null>(null);
 
-  // --- 4. Interactive Simulator Receipts & UI Tabs ---
-  const [simulatorReceipts, setSimulatorReceipts] = useState<SimulatedReceipt[]>([]);
+  // --- 4. Digital copy of printed receipts (History) & UI Tabs ---
+  const [printedSlipsHistory, setPrintedSlipsHistory] = useState<PrintedSlip[]>([]);
   const [activeTab, setActiveTab] = useState<"ai-planner" | "timeline" | "printer-hub">("ai-planner");
   const [completedTaskIds, setCompletedTaskIds] = useState<string[]>([]);
 
@@ -274,7 +276,7 @@ export default function App() {
       try { setCompletedTaskIds(JSON.parse(savedCompleted)); } catch (e) { console.error(e); }
     }
     if (savedReceipts) {
-      try { setSimulatorReceipts(JSON.parse(savedReceipts)); } catch (e) { console.error(e); }
+      try { setPrintedSlipsHistory(JSON.parse(savedReceipts)); } catch (e) { console.error(e); }
     }
     if (savedSettings) {
       try {
@@ -286,7 +288,8 @@ export default function App() {
           headerText: parsed.headerText ?? "مهامي اليومية ✦",
           footerText: parsed.footerText ?? "عش يومك بشغف وإنجاز!",
           autoPrintOnlyHigh: parsed.autoPrintOnlyHigh ?? false,
-          paperFeedLines: parsed.paperFeedLines ?? 4
+          paperFeedLines: parsed.paperFeedLines ?? 4,
+          printMode: parsed.printMode ?? "raster"
         }));
       } catch (e) { console.error(e); }
     }
@@ -306,29 +309,20 @@ export default function App() {
   }, [completedTaskIds]);
 
   useEffect(() => {
-    localStorage.setItem("ai_p_receipts", JSON.stringify(simulatorReceipts));
-  }, [simulatorReceipts]);
+    localStorage.setItem("ai_p_receipts", JSON.stringify(printedSlipsHistory));
+  }, [printedSlipsHistory]);
 
-  // --- Time Tick Engine ---
+  useEffect(() => {
+    localStorage.setItem("ai_p_settings", JSON.stringify(printerSettings));
+  }, [printerSettings]);
+
+  // --- Time Tick Engine (Real Actual Time) ---
   useEffect(() => {
     const interval = setInterval(() => {
-      if (!isSimulatingTime) {
-        setCurrentTime(new Date());
-      }
+      setCurrentTime(new Date());
     }, 1000);
     return () => clearInterval(interval);
-  }, [isSimulatingTime]);
-
-  // Handle Simulated time adjustments
-  useEffect(() => {
-    if (isSimulatingTime) {
-      const simDate = new Date();
-      simDate.setHours(simulatedHour);
-      simDate.setMinutes(simulatedMinute);
-      simDate.setSeconds(0);
-      setCurrentTime(simDate);
-    }
-  }, [isSimulatingTime, simulatedHour, simulatedMinute]);
+  }, []);
 
   const currentFormattedTime = useMemo(() => {
     const hours = String(currentTime.getHours()).padStart(2, "0");
@@ -354,8 +348,11 @@ export default function App() {
   useEffect(() => {
     if (tasks.length === 0) return;
 
-    // Check if any task is scheduled EXACTLY at this minute
-    const matchingTask = tasks.find(t => t.time === currentFormattedTime);
+    // Check if there is any active task right now whose time has arrived/passed and hasn't been printed yet
+    const matchingTask = tasks.find(t => {
+      const isCurrentlyActive = currentFormattedTime >= t.time && currentFormattedTime < t.endTime;
+      return isCurrentlyActive;
+    });
 
     if (matchingTask) {
       const alreadyPrinted = printedTaskIds.includes(matchingTask.id);
@@ -531,7 +528,7 @@ export default function App() {
 
         playSuccessChime();
         setSuccessMsg(`تم بنجاح ربط واقتران الطابعة الحرارية (Capacitor Native): ${device.name || "طابعة BLE اللاسلكية"}`);
-        appendSystemSimulatorLog(`تم توصيل الطابعة الحرارية عبر الواجهة البرمجية الأصلية للأندرويد ✓\nالاسم المكتشف: ${device.name || "طابعة لاسلكية"}`);
+        appendSystemLogSlip(`تم توصيل الطابعة الحرارية عبر الواجهة البرمجية الأصلية للأندرويد ✓\nالاسم المكتشف: ${device.name || "طابعة لاسلكية"}`);
 
       } else {
         // --- 2. Standard Web Browser Bluetooth Flow ---
@@ -583,7 +580,7 @@ export default function App() {
 
         playSuccessChime();
         setSuccessMsg(`تم بنجاح ربط واقتران الطابعة الحرارية: ${device.name || "BLE Printer"}`);
-        appendSystemSimulatorLog(`تم توصيل الطابعة الحرارية الحقيقية ✓\nالاسم المكتشف: ${device.name || "طابعة لاسلكية"}\nبروتوكول الاتصال: GATT Serial Write`);
+        appendSystemLogSlip(`تم توصيل الطابعة الحرارية الحقيقية ✓\nالاسم المكتشف: ${device.name || "طابعة لاسلكية"}\nبروتوكول الاتصال: GATT Serial Write`);
 
         // Add listener for unexpected disconnection
         device.addEventListener("gattserverdisconnected", () => {
@@ -627,7 +624,7 @@ export default function App() {
       deviceName: null
     }));
     setSuccessMsg("تم فصل الطابعة الحرارية بنجاح.");
-    appendSystemSimulatorLog("تم إلغاء اقتران الطابعة الحرارية وتعمل الآن في وضع المحاكاة الافتراضي.");
+    appendSystemLogSlip("تم إلغاء اقتران الطابعة الحرارية وتعمل الآن في وضع الأرشفة الرقمية للقصاصات.");
   };
 
   // Write commands in safe 20-byte chunks
@@ -694,7 +691,7 @@ export default function App() {
         setTasks(withAuto);
         setPrintedTaskIds([]);
         setSuccessMsg(`تم إنتاج ${withAuto.length} مهمة فائقة الدقة بتنسيق متناسق وجاهزة للطباعة!`);
-        appendSystemSimulatorLog(`تم استلام خطة عمل ذكية جديدة بـ ${withAuto.length} مهمة يومية.`);
+        appendSystemLogSlip(`تم استلام خطة عمل ذكية جديدة بـ ${withAuto.length} مهمة يومية.`);
         playSuccessChime();
         setActiveTab("timeline"); // Automatic visual switch to timeline
       } else {
@@ -747,7 +744,7 @@ export default function App() {
       const timeStampStr = `${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, "0")}-${String(stamp.getDate()).padStart(2, "0")} ${String(stamp.getHours()).padStart(2, "0")}:${String(stamp.getMinutes()).padStart(2, "0")}`;
       textLines.push(centerAlign(timeStampStr, w));
 
-      const newReceipt: SimulatedReceipt = {
+      const newReceipt: PrintedSlip = {
         id: `${task.id}-${Date.now()}`,
         title: task.title,
         timeStr: task.time,
@@ -758,21 +755,38 @@ export default function App() {
         textLines: textLines
       };
 
-      setSimulatorReceipts(prev => [newReceipt, ...prev]);
+      setPrintedSlipsHistory(prev => [newReceipt, ...prev]);
 
       // 3. Physical printing command via Web Bluetooth
       if (printerSettings.connected && bleCharacteristic) {
-        const binaryCommands = buildEscPosReceipt(
-          task.title,
-          task.time,
-          task.endTime,
-          task.priority,
-          task.description,
-          printerSettings.lineWidth,
-          printerSettings.density,
-          printerSettings.headerText,
-          printerSettings.footerText
-        );
+        let binaryCommands: Uint8Array;
+        if (printerSettings.printMode === "raster") {
+          // Determine standard width in dots (pixels) based on line width setting (32 characters -> 384px, 48 characters -> 576px)
+          const pixelWidth = printerSettings.lineWidth === 48 ? 576 : 384;
+          const canvas = drawReceiptToCanvas(
+            task.title,
+            task.time,
+            task.endTime,
+            task.priority,
+            task.description,
+            printerSettings.headerText,
+            printerSettings.footerText,
+            pixelWidth
+          );
+          binaryCommands = convertCanvasToEscPosRaster(canvas);
+        } else {
+          binaryCommands = buildEscPosReceipt(
+            task.title,
+            task.time,
+            task.endTime,
+            task.priority,
+            task.description,
+            printerSettings.lineWidth,
+            printerSettings.density,
+            printerSettings.headerText,
+            printerSettings.footerText
+          );
+        }
         await transmitBluetoothData(binaryCommands);
       }
 
@@ -816,7 +830,7 @@ export default function App() {
     return lines;
   }
 
-  const appendSystemSimulatorLog = (message: string) => {
+  const appendSystemLogSlip = (message: string) => {
     const w = printerSettings.lineWidth;
     const divider = "*".repeat(w);
     const textLines = [
@@ -828,7 +842,7 @@ export default function App() {
       centerAlign(new Date().toLocaleTimeString("ar-EG"), w)
     ];
 
-    const sysReceipt: SimulatedReceipt = {
+    const sysReceipt: PrintedSlip = {
       id: `sys-${Date.now()}`,
       title: "إشعار نظام",
       timeStr: "--:--",
@@ -839,17 +853,17 @@ export default function App() {
       textLines: textLines
     };
 
-    setSimulatorReceipts(prev => [sysReceipt, ...prev]);
+    setPrintedSlipsHistory(prev => [sysReceipt, ...prev]);
   };
 
-  // Delete simulated printed slip
+  // Delete printed slip
   const handleDeleteReceiptSlip = (id: string) => {
-    setSimulatorReceipts(prev => prev.filter(r => r.id !== id));
+    setPrintedSlipsHistory(prev => prev.filter(r => r.id !== id));
   };
 
-  // Clear simulated prints history
-  const handleClearAllSimulatorReceipts = () => {
-    setSimulatorReceipts([]);
+  // Clear printed slips history
+  const handleClearAllPrintedSlips = () => {
+    setPrintedSlipsHistory([]);
     localStorage.removeItem("ai_p_receipts");
   };
 
@@ -951,13 +965,13 @@ export default function App() {
       divider,
       `عرض الحقول: ${w} حرف`,
       `الوضوح المختار: ${printerSettings.density}`,
-      `الحالة: جاهز ومحاكى بنجاح`,
+      `الحالة: متصل وجاهز للعمل`,
       divider,
       centerAlign("AISTUDIO PRINT ENGINE v2.0", w),
       divider
     ];
 
-    const testReceipt: SimulatedReceipt = {
+    const testReceipt: PrintedSlip = {
       id: `test-${Date.now()}`,
       title: "ورقة اختبار الاتصال",
       timeStr: "--:--",
@@ -968,55 +982,71 @@ export default function App() {
       textLines: textLines
     };
 
-    setSimulatorReceipts(prev => [testReceipt, ...prev]);
+    setPrintedSlipsHistory(prev => [testReceipt, ...prev]);
 
     if (printerSettings.connected && bleCharacteristic) {
       // Create a basic testing command list
-      const commandBytes = buildEscPosReceipt(
-        "اختبار الطابعة",
-        "00:00",
-        "00:00",
-        "low",
-        "ورقة اختبار الاتصال الناجح.",
-        printerSettings.lineWidth,
-        printerSettings.density,
-        printerSettings.headerText,
-        printerSettings.footerText
-      );
+      let commandBytes: Uint8Array;
+      if (printerSettings.printMode === "raster") {
+        const pixelWidth = printerSettings.lineWidth === 48 ? 576 : 384;
+        const canvas = drawReceiptToCanvas(
+          "اختبار الطابعة",
+          "00:00",
+          "00:00",
+          "low",
+          "ورقة اختبار الاتصال الناجح وجودة الطباعة الرسومية ثنائية الأبعاد باللغة العربية الفصحى 100%.",
+          printerSettings.headerText,
+          printerSettings.footerText,
+          pixelWidth
+        );
+        commandBytes = convertCanvasToEscPosRaster(canvas);
+      } else {
+        commandBytes = buildEscPosReceipt(
+          "اختبار الطابعة",
+          "00:00",
+          "00:00",
+          "low",
+          "ورقة اختبار الاتصال الناجح.",
+          printerSettings.lineWidth,
+          printerSettings.density,
+          printerSettings.headerText,
+          printerSettings.footerText
+        );
+      }
       await transmitBluetoothData(commandBytes);
     }
     setSuccessMsg("تمت طباعة ورقة الاختبار والمحاكاة بنجاح.");
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-brand-500/20 selection:text-brand-900 antialiased overflow-x-hidden flex flex-col justify-between" dir="rtl">
+    <div className="min-h-screen bg-slate-100 md:bg-slate-100 text-slate-800 font-sans selection:bg-brand-500/20 selection:text-brand-900 antialiased overflow-x-hidden flex flex-col justify-between" dir="rtl">
       
       {/* Decorative Aurora Background Glows */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-[450px] bg-radial from-brand-500/10 via-brand-200/5 to-transparent blur-3xl pointer-events-none -z-10" />
 
       {/* --- Main Mobile Shell Frame Wrapper --- */}
-      <div className="flex-1 w-full max-w-lg mx-auto bg-white border-x border-slate-100 shadow-2xl relative flex flex-col min-h-screen">
+      <div className="flex-1 w-full max-w-md md:max-w-lg mx-auto bg-white md:border-x md:border-slate-150 md:shadow-2xl relative flex flex-col min-h-screen">
         
         {/* Sleek Dynamic Island / Top-Bar Header */}
-        <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-100 p-4 pb-3 flex flex-col gap-3">
+        <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-100 p-3 pb-2.5 flex flex-col gap-2.5">
           
           {/* Header Main row */}
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
               <div className="p-2 bg-gradient-to-tr from-brand-600 to-brand-500 rounded-xl text-white shadow-lg shadow-brand-500/20">
-                <Printer className="w-5 h-5 stroke-[2]" />
+                <Printer className="w-4.5 h-4.5 stroke-[2]" />
               </div>
               <div>
-                <h1 className="text-base font-bold text-slate-950 tracking-tight flex items-center gap-1.5">
+                <h1 className="text-sm font-bold text-slate-950 tracking-tight flex items-center gap-1">
                   منظم المهام الذكي
-                  <span className="inline-block w-2 h-2 rounded-full bg-brand-500 animate-ping" />
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-brand-500 animate-ping" />
                 </h1>
-                <p className="text-[10px] text-slate-500 font-medium">الذكاء الاصطناعي مدمج بالطابعة الحرارية</p>
+                <p className="text-[9px] text-slate-500 font-medium">الذكاء الاصطناعي مدمج بالطابعة الحرارية</p>
               </div>
             </div>
  
             {/* Global Settings & Toggles */}
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1">
               
               {/* Sound Bell Toggle */}
               <button 
@@ -1028,48 +1058,101 @@ export default function App() {
                 }`}
                 title={soundEnabled ? "إيقاف الصوت التنبيهي" : "تفعيل الصوت التنبيهي"}
               >
-                {soundEnabled ? <Volume2 className="w-4.5 h-4.5" /> : <VolumeX className="w-4.5 h-4.5" />}
+                {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
               </button>
  
               {/* Device Bluetooth Pair Trigger */}
               <button
                 onClick={printerSettings.connected ? handleDisconnectBLE : handlePairBLEDevice}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[11px] font-bold transition-all ${
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xl border text-[10px] font-bold transition-all ${
                   printerSettings.connected
                     ? "bg-emerald-50 border-emerald-200 text-emerald-600"
                     : "bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200/80"
                 }`}
               >
-                <Bluetooth className={`w-3.5 h-3.5 ${printerSettings.connected ? "text-emerald-500 animate-pulse" : "text-slate-400"}`} />
-                <span>{printerSettings.connected ? "متصل" : "اقتران طابعة"}</span>
+                <Bluetooth className={`w-3 h-3 ${printerSettings.connected ? "text-emerald-500 animate-pulse" : "text-slate-400"}`} />
+                <span>{printerSettings.connected ? "متصل" : "اقتران"}</span>
               </button>
  
             </div>
           </div>
  
           {/* Real-time Task HUD Stats */}
-          <div className="grid grid-cols-12 gap-2 bg-slate-50 border border-slate-100 rounded-2xl p-2.5">
+          <div className="grid grid-cols-12 gap-1.5 bg-slate-50 border border-slate-100 rounded-xl p-2">
             {/* Clock Widget */}
-            <div className="col-span-5 flex items-center gap-2 border-l border-slate-200 pr-1">
-              <Clock className="w-4 h-4 text-brand-500 shrink-0" />
+            <div className="col-span-4 flex items-center gap-1.5 border-l border-slate-200 pr-0.5">
+              <Clock className="w-3.5 h-3.5 text-brand-500 shrink-0" />
               <div className="flex flex-col">
-                <span className="text-xs font-mono font-bold text-slate-900 tracking-wider">
+                <span className="text-[11px] font-mono font-bold text-slate-900 tracking-wider">
                   {currentTime.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
                 </span>
-                <span className="text-[9px] text-slate-400">التوقيت المحلي</span>
+                <span className="text-[8px] text-slate-400">الوقت الآن</span>
               </div>
             </div>
  
             {/* Current Active Task Status widget */}
-            <div className="col-span-7 flex items-center gap-2 pl-1">
-              <div className="w-2.5 h-2.5 rounded-full bg-brand-500 animate-pulse shrink-0" />
+            <div className="col-span-8 flex items-center gap-1.5 pl-0.5">
+              <div className="w-2 h-2 rounded-full bg-brand-500 animate-pulse shrink-0" />
               <div className="flex-1 min-w-0">
-                <span className="text-[9px] text-slate-400 block font-medium">النشاط الجاري الآن</span>
-                <p className="text-xs font-bold text-slate-800 truncate">
+                <span className="text-[8px] text-slate-400 block font-medium">النشاط الجاري الآن</span>
+                <p className="text-[11px] font-bold text-slate-800 truncate">
                   {activeTask ? activeTask.title : "لا يوجد مهام حالية"}
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* Sticky Tab Selection Header Buttons */}
+          <div className="flex bg-slate-100/90 p-1 rounded-xl border border-slate-200/60 gap-1">
+            <button
+              onClick={() => setActiveTab("ai-planner")}
+              className={`flex-1 py-2 rounded-lg text-[10px] font-bold transition-all flex items-center justify-center gap-1 ${
+                activeTab === "ai-planner"
+                  ? "bg-gradient-to-tr from-brand-600 to-brand-500 text-white shadow-xs shadow-brand-500/15"
+                  : "text-slate-500 hover:text-slate-800 hover:bg-white/50"
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>مخطط الذكاء</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("timeline")}
+              className={`flex-1 py-2 rounded-lg text-[10px] font-bold transition-all flex items-center justify-center gap-1 ${
+                activeTab === "timeline"
+                  ? "bg-gradient-to-tr from-brand-600 to-brand-500 text-white shadow-xs shadow-brand-500/15"
+                  : "text-slate-500 hover:text-slate-800 hover:bg-white/50"
+              }`}
+            >
+              <Calendar className="w-3.5 h-3.5" />
+              <span>المهام اليومية</span>
+              {tasks.length > 0 && (
+                <span className={`text-[9px] font-mono px-1 py-0.2 rounded-md ${
+                  activeTab === "timeline" ? "bg-white/20 text-white" : "bg-slate-200 text-slate-600"
+                }`}>
+                  {tasks.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab("printer-hub")}
+              className={`flex-1 py-2 rounded-lg text-[10px] font-bold transition-all flex items-center justify-center gap-1 ${
+                activeTab === "printer-hub"
+                  ? "bg-gradient-to-tr from-brand-600 to-brand-500 text-white shadow-xs shadow-brand-500/15"
+                  : "text-slate-500 hover:text-slate-800 hover:bg-white/50"
+              }`}
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>مركز الطباعة الفعلي</span>
+              {printedSlipsHistory.length > 0 && (
+                <span className={`text-[9px] font-mono px-1 py-0.2 rounded-md ${
+                  activeTab === "printer-hub" ? "bg-white/20 text-white" : "bg-slate-200 text-slate-600"
+                }`}>
+                  {printedSlipsHistory.length}
+                </span>
+              )}
+            </button>
           </div>
  
         </header>
@@ -1112,59 +1195,6 @@ export default function App() {
         {/* --- Main Phone View Scrolling Area --- */}
         <div className="flex-1 overflow-y-auto px-4 py-3 pb-24 space-y-6">
           
-          {/* Tab Selection Header Buttons */}
-          <div className="flex bg-slate-100 p-1 rounded-2xl border border-slate-200/80 gap-1">
-            <button
-              onClick={() => setActiveTab("ai-planner")}
-              className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-                activeTab === "ai-planner"
-                  ? "bg-gradient-to-tr from-brand-600 to-brand-500 text-white shadow-md shadow-brand-500/15"
-                  : "text-slate-500 hover:text-slate-800 hover:bg-white/50"
-              }`}
-            >
-              <Sparkles className="w-4 h-4" />
-              <span>مخطط الذكاء ✦</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab("timeline")}
-              className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-                activeTab === "timeline"
-                  ? "bg-gradient-to-tr from-brand-600 to-brand-500 text-white shadow-md shadow-brand-500/15"
-                  : "text-slate-500 hover:text-slate-800 hover:bg-white/50"
-              }`}
-            >
-              <Calendar className="w-4 h-4" />
-              <span>المهام اليومية</span>
-              {tasks.length > 0 && (
-                <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
-                  activeTab === "timeline" ? "bg-white/20 text-white" : "bg-slate-200 text-slate-600"
-                }`}>
-                  {tasks.length}
-                </span>
-              )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab("printer-hub")}
-              className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-                activeTab === "printer-hub"
-                  ? "bg-gradient-to-tr from-brand-600 to-brand-500 text-white shadow-md shadow-brand-500/15"
-                  : "text-slate-500 hover:text-slate-800 hover:bg-white/50"
-              }`}
-            >
-              <Printer className="w-4 h-4" />
-              <span>الطابعة والمحاكي</span>
-              {simulatorReceipts.length > 0 && (
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
-                  activeTab === "printer-hub" ? "bg-white/20 text-white" : "bg-slate-200 text-slate-600"
-                }`}>
-                  {simulatorReceipts.length}
-                </span>
-              )}
-            </button>
-          </div>
-
           {/* TAB 1: AI Planner Interface */}
           {activeTab === "ai-planner" && (
             <div className="space-y-4 animate-fadeIn">
@@ -1264,89 +1294,6 @@ export default function App() {
           {/* TAB 2: Dynamic Timeline & Tasks schedule */}
           {activeTab === "timeline" && (
             <div className="space-y-4 animate-fadeIn">
-              
-              {/* Current Time Machine Simulator Card */}
-              <div className="bg-slate-50 border border-slate-200 p-4 rounded-3xl flex flex-col gap-3.5 shadow-xs">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Clock className="w-4 h-4 text-brand-600" />
-                    <span className="text-xs font-bold text-slate-800">التحكم في الوقت (لتجربة الطباعة الفورية)</span>
-                  </div>
-                  
-                  {/* Toggle button */}
-                  <button
-                    onClick={() => setIsSimulatingTime(!isSimulatingTime)}
-                    className={`px-2.5 py-1 rounded-full text-[9px] font-bold transition-all ${
-                      isSimulatingTime 
-                        ? "bg-brand-600 text-white" 
-                        : "bg-slate-200 text-slate-600 hover:bg-slate-300"
-                    }`}
-                  >
-                    {isSimulatingTime ? "تعطيل المحاكاة" : "تفعيل المحاكاة"}
-                  </button>
-                </div>
-
-                <p className="text-[10px] text-slate-500 leading-relaxed">
-                  يمكنك تحويل الوقت لوضع المحاكاة وتقديم الدقائق لكي يتطابق وقت التطبيق الحالي مع وقت بدء إحدى مهامك، لتشهد انطلاق التنبيه الصوتي الحركي والطباعة الفورية على الطابعة الورقية فوراً!
-                </p>
-
-                {isSimulatingTime && (
-                  <div className="bg-white border border-slate-200 p-3 rounded-2xl flex items-center justify-between gap-3 animate-fadeIn">
-                    <div className="flex items-center gap-2">
-                      <div className="flex flex-col items-center">
-                        <span className="text-[8px] text-slate-400 font-bold mb-1">ساعة</span>
-                        <input
-                          type="number"
-                          min="0"
-                          max="23"
-                          value={simulatedHour}
-                          onChange={(e) => setSimulatedHour(Math.max(0, Math.min(23, Number(e.target.value))))}
-                          className="w-10 bg-slate-50 text-center rounded-lg border border-slate-200 p-1 font-mono text-xs font-bold text-slate-800 focus:border-brand-500 outline-hidden"
-                        />
-                      </div>
-                      <span className="text-brand-500 font-bold text-xs mt-3">:</span>
-                      <div className="flex flex-col items-center">
-                        <span className="text-[8px] text-slate-400 font-bold mb-1">دقيقة</span>
-                        <input
-                          type="number"
-                          min="0"
-                          max="59"
-                          value={simulatedMinute}
-                          onChange={(e) => setSimulatedMinute(Math.max(0, Math.min(59, Number(e.target.value))))}
-                          className="w-10 bg-slate-50 text-center rounded-lg border border-slate-200 p-1 font-mono text-xs font-bold text-slate-800 focus:border-brand-500 outline-hidden"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => {
-                          setSimulatedMinute(prev => {
-                            if (prev === 59) {
-                              setSimulatedHour(h => (h + 1) % 24);
-                              return 0;
-                            }
-                            return prev + 1;
-                          });
-                        }}
-                        className="bg-brand-600 hover:bg-brand-700 text-white font-bold text-[10px] py-1.5 px-3 rounded-xl transition-all"
-                      >
-                        + 1 دقيقة
-                      </button>
-                      <button
-                        onClick={() => {
-                          const d = new Date();
-                          setSimulatedHour(d.getHours());
-                          setSimulatedMinute(d.getMinutes());
-                        }}
-                        className="text-[9px] text-slate-500 hover:text-slate-800 font-bold underline px-1"
-                      >
-                        الآن
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
 
               {/* Tasks schedule header with controllers */}
               <div className="flex items-center justify-between px-1">
@@ -1684,6 +1631,7 @@ export default function App() {
                                   {window.location.origin}
                                 </code>
                                 <button
+                                  type="button"
                                   onClick={() => {
                                     navigator.clipboard.writeText(window.location.origin);
                                     setSuccessMsg("تم نسخ الرابط بنجاح! الصقه الآن في متصفح Chrome بهاتفك.");
@@ -1748,111 +1696,135 @@ export default function App() {
                   )}
                 </div>
               </div>
-              
-              {/* Virtual Skeuomorphic Thermal Printer Live simulator */}
-              <div className="bg-slate-50 border border-slate-200 rounded-3xl p-5 shadow-xs relative overflow-hidden flex flex-col items-center">
-                
-                <div className="absolute top-2 left-3 flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-                  <span className="text-[9px] text-slate-500 font-mono">Sim Active</span>
-                </div>
 
-                {/* 3D printer slot illustration */}
-                <div className="w-full max-w-xs bg-slate-100 rounded-2xl p-4 border border-slate-250 shadow-inner flex flex-col items-center relative">
-                  
-                  {/* Status lights & brand mockup */}
-                  <div className="flex items-center justify-between w-full mb-2 px-1">
-                    <span className="text-[8px] font-mono text-slate-400 tracking-widest font-bold">AISTUDIO BLE-58T</span>
-                    <div className="flex items-center gap-1">
-                      <div className={`w-1.5 h-1.5 rounded-full ${printerSettings.connected ? "bg-emerald-500" : "bg-red-500"} shadow-md`} />
-                      <div className="w-1.5 h-1.5 rounded-full bg-amber-500 shadow-md" />
-                    </div>
-                  </div>
-
-                  {/* Physical Paper Slot Cutter cutout */}
-                  <div className="w-full h-3 bg-slate-200 border-y border-slate-300 rounded-md relative shadow-inner overflow-hidden">
-                    <div className="absolute inset-x-0 top-0.5 h-[1px] bg-slate-400" />
-                  </div>
-
-                  {/* Paper Roll out area */}
-                  <div className="w-full bg-slate-50/40 rounded-b-xl overflow-hidden p-2 flex flex-col items-center min-h-[160px] max-h-[300px] overflow-y-auto mt-1 relative scrollbar-none">
+              {/* Skeuomorphic Thermal Printer Live Next-Task Preview */}
+              {(() => {
+                const nextTaskToPrint = tasks.find(t => !printedTaskIds.includes(t.id) && !completedTaskIds.includes(t.id)) || 
+                                        tasks.find(t => !printedTaskIds.includes(t.id)) || 
+                                        tasks[0];
+                return (
+                  <div className="bg-slate-50 border border-slate-200 rounded-3xl p-5 shadow-xs relative overflow-hidden flex flex-col items-center">
                     
-                    <AnimatePresence>
-                      {simulatorReceipts.length === 0 ? (
-                        <motion.div 
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          className="text-center py-10 text-slate-400 flex flex-col items-center gap-2"
-                        >
-                          <FileText className="w-8 h-8 text-slate-300 stroke-[1.5]" />
-                          <span className="text-[10px] font-bold">لا توجد قصاصات مطبوعة حالياً</span>
-                          <span className="text-[9px] text-slate-400">قم بطباعة أي مهمة لتظهر هنا فوراً</span>
-                        </motion.div>
-                      ) : (
-                        <div className="w-full space-y-4">
-                          {simulatorReceipts.map((receipt) => (
-                            <motion.div
-                              key={receipt.id}
-                              initial={{ opacity: 0, y: -40, scaleY: 0.1 }}
-                              animate={{ opacity: 1, y: 0, scaleY: 1 }}
-                              transition={{ duration: 0.4 }}
-                              className="w-full paper-tear p-4 shadow-lg text-slate-900 rounded-t-sm select-all font-mono text-[9px] leading-relaxed border border-gray-100 flex flex-col gap-1 relative text-right"
-                              style={{ fontFamily: "monospace", direction: "rtl" }}
-                            >
-                              
-                              {/* Slips action utility overlays on hover */}
-                              <div className="absolute top-2 left-2 flex items-center gap-1.5 select-none print:hidden">
-                                <button
-                                  onClick={() => handleCopyReceiptText(receipt.textLines)}
-                                  className="p-1 bg-gray-100 hover:bg-amber-100 text-gray-700 hover:text-amber-800 rounded-lg transition-all"
-                                  title="نسخ النص"
-                                >
-                                  <Copy className="w-3 h-3" />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteReceiptSlip(receipt.id)}
-                                  className="p-1 bg-gray-100 hover:bg-rose-100 text-gray-700 hover:text-rose-800 rounded-lg transition-all"
-                                  title="تمزيق قصاصة الورق"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              </div>
+                    <div className="absolute top-2 left-3 flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                      <span className="text-[9px] text-slate-500 font-mono">معاينة حية</span>
+                    </div>
 
-                              {/* Formatted POS print output lines */}
-                              {receipt.textLines.map((line, lIdx) => (
-                                <div 
-                                  key={lIdx} 
-                                  className="whitespace-pre font-mono text-[8px] tracking-normal font-medium"
-                                  style={{ letterSpacing: "-0.5px" }}
-                                >
-                                  {line}
-                                </div>
-                              ))}
+                    <div className="text-center mb-3">
+                      <span className="text-[11px] font-bold text-slate-600 block">ورقة الطباعة الحرارية المجهزة</span>
+                      <span className="text-[9px] text-slate-400">تنسيق ذكي، احترافي وموفر للورق 🍃</span>
+                    </div>
 
-                              {/* Simulation meta */}
-                              <div className="mt-2 text-[7px] text-gray-400 text-center select-none border-t border-dashed border-gray-200 pt-1.5">
-                                تم توليدها بالذكاء الاصطناعي ✦ وقت الطباعة: {receipt.timestamp}
-                              </div>
-                            </motion.div>
-                          ))}
+                    {/* 3D printer slot illustration */}
+                    <div className="w-full max-w-xs bg-slate-100 rounded-2xl p-4 border border-slate-250 shadow-inner flex flex-col items-center relative">
+                      
+                      {/* Status lights & brand mockup */}
+                      <div className="flex items-center justify-between w-full mb-2 px-1">
+                        <span className="text-[8px] font-mono text-slate-400 tracking-widest font-bold">AISTUDIO BLE-58T</span>
+                        <div className="flex items-center gap-1">
+                          <div className={`w-1.5 h-1.5 rounded-full ${printerSettings.connected ? "bg-emerald-500" : "bg-red-500"} shadow-md`} />
+                          <div className="w-1.5 h-1.5 rounded-full bg-amber-500 shadow-md" />
                         </div>
-                      )}
-                    </AnimatePresence>
+                      </div>
 
+                      {/* Physical Paper Slot Cutter cutout */}
+                      <div className="w-full h-3 bg-slate-200 border-y border-slate-300 rounded-md relative shadow-inner overflow-hidden">
+                        <div className="absolute inset-x-0 top-0.5 h-[1px] bg-slate-400" />
+                      </div>
+
+                      {/* Paper Roll out area */}
+                      <div className="w-full mt-1.5 relative">
+                        
+                        <AnimatePresence mode="wait">
+                          {!nextTaskToPrint ? (
+                            <motion.div 
+                              key="no-tasks"
+                              initial={{ opacity: 0, y: -10 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0 }}
+                              className="w-full bg-white p-6 shadow-md rounded-b-xl border border-gray-100 text-center flex flex-col items-center gap-2"
+                            >
+                              <CheckCircle className="w-8 h-8 text-emerald-500 stroke-[1.5]" />
+                              <span className="text-[10px] font-bold text-slate-800">لا توجد مهام متبقية للطباعة</span>
+                              <span className="text-[9px] text-slate-500">تمت طباعة جميع المهام المجدولة اليوم بنجاح واحترافية!</span>
+                            </motion.div>
+                          ) : (
+                            <motion.div
+                              key={nextTaskToPrint.id}
+                              initial={{ opacity: 0, y: -20 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0 }}
+                              className="w-full bg-white shadow-xl text-slate-900 border border-gray-100 flex flex-col relative text-right p-4 rounded-b-lg overflow-hidden"
+                              style={{ 
+                                direction: "rtl",
+                                backgroundImage: "radial-gradient(circle, #f3f4f6 1px, transparent 1px)",
+                                backgroundSize: "24px 24px"
+                              }}
+                            >
+                              {/* Elegant torn-paper top and bottom boundaries */}
+                              <div className="absolute inset-x-0 top-0 h-1 bg-[linear-gradient(135deg,#e5e7eb_25%,transparent_25%),linear-gradient(225deg,#e5e7eb_25%,transparent_25%)] bg-[size:6px_12px] bg-repeat-x rotate-180" />
+                              <div className="absolute inset-x-0 bottom-0 h-1 bg-[linear-gradient(135deg,#e5e7eb_25%,transparent_25%),linear-gradient(225deg,#e5e7eb_25%,transparent_25%)] bg-[size:6px_12px] bg-repeat-x" />
+
+                              {/* Paper Content */}
+                              <div className="py-2.5 space-y-2">
+                                {/* Time badge */}
+                                <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono font-bold">
+                                  <span className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded-md flex items-center gap-1 shrink-0">
+                                    <Clock className="w-3 h-3 text-brand-600" />
+                                    ⏱ {nextTaskToPrint.time} - {nextTaskToPrint.endTime}
+                                  </span>
+                                  <span className="text-[8px] font-bold text-brand-600 bg-brand-50 border border-brand-150 px-1 py-0.5 rounded-md shrink-0">
+                                    المهمة التالية ✦
+                                  </span>
+                                </div>
+
+                                {/* Task Title */}
+                                <h4 className="text-xs font-extrabold text-slate-900 leading-snug">
+                                  {nextTaskToPrint.title}
+                                </h4>
+
+                                {/* Task Description (only if it exists) */}
+                                {nextTaskToPrint.description && nextTaskToPrint.description.trim() ? (
+                                  <div className="pt-1.5 border-t border-dashed border-slate-300">
+                                    <p className="text-[10px] text-slate-600 leading-relaxed font-medium">
+                                      {nextTaskToPrint.description}
+                                    </p>
+                                  </div>
+                                ) : null}
+
+                                {/* Compact separator & Print timestamp */}
+                                <div className="pt-2 border-t border-dotted border-slate-300 text-center select-none flex flex-col gap-0.5">
+                                  <span className="text-[8px] font-mono text-slate-400">
+                                    تم تجهيزها للطباعة الذكية ✦ {new Date().toLocaleDateString("ar-EG")}
+                                  </span>
+                                  <span className="text-[7px] text-slate-300 font-mono">
+                                    AISTUDIO BLE-58T • {printerSettings.printMode === "raster" ? "الطباعة الرسومية (مستحسن)" : "الطباعة النصية مباشرة"}
+                                  </span>
+                                </div>
+                              </div>
+
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+
+                      </div>
+
+                    </div>
+
+                    {/* Print button right below the paper mockup */}
+                    {nextTaskToPrint && (
+                      <button
+                        type="button"
+                        onClick={() => triggerPrintProcess(nextTaskToPrint, false)}
+                        className="mt-4 bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-700 hover:to-brand-600 text-white font-bold text-xs py-2.5 px-6 rounded-2xl shadow-md shadow-brand-500/10 transition-all flex items-center gap-2 active:scale-98 animate-fadeIn"
+                      >
+                        <Printer className="w-4 h-4" />
+                        <span>اطبع هذه المهمة الآن (وفر الورق)</span>
+                      </button>
+                    )}
                   </div>
-
-                </div>
-
-                {/* Simulated printer clear button */}
-                {simulatorReceipts.length > 0 && (
-                  <button
-                    onClick={handleClearAllSimulatorReceipts}
-                    className="mt-3 text-[10px] text-slate-500 hover:text-rose-600 font-bold transition-all underline animate-fadeIn"
-                  >
-                    تنظيف أرشيف المخرجات الورقية
-                  </button>
-                )}
-              </div>
+                );
+              })()}
 
               {/* Real BLE Hardware Settings Form */}
               <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs space-y-4">
@@ -1911,6 +1883,37 @@ export default function App() {
                         <option value={4}>4 - داكن</option>
                         <option value={5}>5 - داكن جداً</option>
                       </select>
+                    </div>
+                  </div>
+
+                  {/* Print Mode Selector */}
+                  <div className="pt-2 border-t border-slate-100">
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1.5">طريقة معالجة الحبر واللغة العربية</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPrinterSettings(prev => ({ ...prev, printMode: "raster" }))}
+                        className={`p-2.5 rounded-xl border text-xs font-bold transition-all flex flex-col items-center text-center justify-center gap-1 leading-normal ${
+                          printerSettings.printMode === "raster"
+                            ? "border-brand-600 bg-brand-50 text-brand-700 shadow-xs"
+                            : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                        }`}
+                      >
+                        <span className="text-[10.5px]">الطباعة الرسومية (مستحسن ✦)</span>
+                        <span className="text-[8px] font-medium text-slate-400">يرسم النص بدقة كصورة لحل مشاكل الحروف المتقطعة</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPrinterSettings(prev => ({ ...prev, printMode: "text" }))}
+                        className={`p-2.5 rounded-xl border text-xs font-bold transition-all flex flex-col items-center text-center justify-center gap-1 leading-normal ${
+                          printerSettings.printMode === "text"
+                            ? "border-brand-600 bg-brand-50 text-brand-700 shadow-xs"
+                            : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                        }`}
+                      >
+                        <span className="text-[10.5px]">الطباعة النصية مباشرة</span>
+                        <span className="text-[8px] font-medium text-slate-400">يرسل أحرف نصية مباشرة (تتطلب طابعة تدعم CP1256)</span>
+                      </button>
                     </div>
                   </div>
 
@@ -2081,7 +2084,7 @@ export default function App() {
           <div className="flex-1 text-center border-r border-slate-100">
             <span className="text-[9px] text-slate-400 block">الورق المطبوع</span>
             <span className="text-xs font-mono font-bold text-brand-600">
-              {simulatorReceipts.length} قصاصات
+              {printedSlipsHistory.length} قصاصة
             </span>
           </div>
         </footer>

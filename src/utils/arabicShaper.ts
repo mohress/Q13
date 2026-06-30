@@ -321,21 +321,13 @@ export function buildEscPosReceipt(
     commands.push(0x0A);
   };
 
-  // 1. Header
-  if (customHeader) {
-    addLine(customHeader, "center");
-  } else {
-    addLine("منظم المهام الذكي", "center");
-  }
-  addDivider();
-
-  // 2. Task Time
-  addLine(`الوقت: ${timeStr} - ${endTimeStr}`, "right");
+  // 1. Task Time (Compact)
+  addLine(`⏱ ${timeStr} - ${endTimeStr}`, "right");
   
-  // 3. Task Title (double height/width ESC ! 0x10 / 0x20 / 0x30)
-  commands.push(0x1B, 0x61, 1); // Center
+  // 2. Task Title (double height, right-aligned)
+  commands.push(0x1B, 0x61, 2); // Right align
   commands.push(0x1B, 0x21, 0x10); // Double height
-  const shapedTitle = reverseArabicForPrinting(title, Math.floor(lineWidth / 1.5));
+  const shapedTitle = reverseArabicForPrinting(title, Math.floor(lineWidth / 1.2));
   const titleBytes = convertToWindows1256(shapedTitle);
   for (let b of Array.from(titleBytes)) {
     commands.push(b);
@@ -343,23 +335,16 @@ export function buildEscPosReceipt(
   commands.push(0x0A);
   commands.push(0x1B, 0x21, 0x00); // Standard size
 
-  // 4. Priority
-  const priorityAr = priority === "high" ? "أهمية قصوى !!!" : priority === "medium" ? "أهمية متوسطة" : "أهمية عادية";
-  addLine(`الأولوية: ${priorityAr}`, "right");
-  
-  addDivider();
-
-  // 5. Description
-  addLine(description, "right");
-
-  addDivider();
-
-  // 6. Footer
-  if (customFooter) {
-    addLine(customFooter, "center");
+  // 3. Description (if any)
+  if (description && description.trim()) {
+    // Simple dotted separator
+    addLine("-".repeat(lineWidth), "right");
+    addLine(description, "right");
   }
+
+  // 4. Compact separator and timestamp
+  addLine("-".repeat(lineWidth), "center");
   
-  // Custom timestamp
   const now = new Date();
   const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   commands.push(0x1B, 0x61, 1); // Center
@@ -368,8 +353,8 @@ export function buildEscPosReceipt(
   }
   commands.push(0x0A);
 
-  // Feed 4 lines of paper
-  commands.push(0x1B, 0x64, 4);
+  // Feed 2 lines of paper (saving space!)
+  commands.push(0x1B, 0x64, 2);
 
   // Cut paper (GS V 66 0)
   commands.push(0x1D, 0x56, 66, 0);

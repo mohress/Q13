@@ -18,9 +18,10 @@ export interface PrinterSettings {
   footerText: string;
   autoPrintOnlyHigh: boolean;
   paperFeedLines: number;
+  printMode: "text" | "raster";
 }
 
-export interface SimulatedReceipt {
+export interface PrintedSlip {
   id: string;
   title: string;
   timeStr: string;
