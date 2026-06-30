@@ -11,23 +11,37 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Initialize Gemini SDK with telemetry header
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
+// Initialize Gemini SDK with helper function for dynamic API keys
+const getAiClient = (customKey?: string) => {
+  const key = customKey || process.env.GEMINI_API_KEY;
+  if (!key) {
+    throw new Error("مفتاح Gemini API Key غير متوفر. يرجى إدخال المفتاح في قسم إعدادات الذكاء الاصطناعي للمتابعة.");
+  }
+  return new GoogleGenAI({
+    apiKey: key,
+    httpOptions: {
+      headers: {
+        "User-Agent": "aistudio-build",
+      },
     },
-  },
-});
+  });
+};
 
 // Endpoint to generate structured tasks from user plan
 app.post("/api/generate-tasks", async (req, res) => {
   try {
-    const { plan, localTime } = req.body;
+    const { plan, localTime, geminiApiKey } = req.body;
 
     if (!plan || typeof plan !== "string") {
       res.status(400).json({ error: "الخطة النصية مطلوبة لإنشاء المهام." });
+      return;
+    }
+
+    let client;
+    try {
+      client = getAiClient(geminiApiKey);
+    } catch (keyErr: any) {
+      res.status(400).json({ error: keyErr.message });
       return;
     }
 
@@ -48,7 +62,7 @@ app.post("/api/generate-tasks", async (req, res) => {
 الوقت الحالي لدي الآن هو: ${localTime || "غير محدد"}.
 يرجى تحويلها إلى قائمة المهام اليومية المهيكلة بدقة بالكامل وحسب الـ Schema المحددة.`;
 
-    const response = await ai.models.generateContent({
+    const response = await client.models.generateContent({
       model: "gemini-3.5-flash",
       contents: userPrompt,
       config: {

@@ -184,6 +184,78 @@ export function convertCanvasToEscPosRaster(canvas: HTMLCanvasElement): Uint8Arr
 }
 
 /**
+ * Converts HTMLCanvasElement RGBA pixels into sliced horizontal ESC/POS monochrome bit-image commands (GS v 0).
+ * Slicing prevents hardware input buffer overflows in small BLE thermal printers (e.g. Luck Jingle, PT-210, MPT-II).
+ */
+export function convertCanvasToEscPosRasterStripes(
+  canvas: HTMLCanvasElement,
+  stripeHeight: number = 40
+): Uint8Array[] {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get 2D context");
+
+  const width = canvas.width;
+  const height = canvas.height;
+  const widthInBytes = Math.floor(width / 8);
+  const stripes: Uint8Array[] = [];
+
+  for (let yStart = 0; yStart < height; yStart += stripeHeight) {
+    const currentStripeHeight = Math.min(stripeHeight, height - yStart);
+    const imgData = ctx.getImageData(0, yStart, width, currentStripeHeight);
+    const data = imgData.data;
+
+    const rasterBytes = new Uint8Array(widthInBytes * currentStripeHeight);
+
+    for (let y = 0; y < currentStripeHeight; y++) {
+      for (let xByte = 0; xByte < widthInBytes; xByte++) {
+        let byteVal = 0;
+        for (let bit = 0; bit < 8; bit++) {
+          const x = xByte * 8 + bit;
+          const pixelIdx = (y * width + x) * 4;
+
+          const r = data[pixelIdx];
+          const g = data[pixelIdx + 1];
+          const b = data[pixelIdx + 2];
+          const a = data[pixelIdx + 3];
+
+          let isBlack = false;
+          if (a > 40) {
+            const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+            isBlack = brightness < 150;
+          }
+
+          if (isBlack) {
+            byteVal |= (1 << (7 - bit));
+          }
+        }
+        rasterBytes[y * widthInBytes + xByte] = byteVal;
+      }
+    }
+
+    // ESC/POS raster stripe header (GS v 0 m xL xH yL yH)
+    const xL = widthInBytes & 0xFF;
+    const xH = (widthInBytes >> 8) & 0xFF;
+    const yL = currentStripeHeight & 0xFF;
+    const yH = (currentStripeHeight >> 8) & 0xFF;
+
+    const escPosCommand = new Uint8Array(8 + rasterBytes.length);
+    escPosCommand[0] = 0x1D;
+    escPosCommand[1] = 0x76;
+    escPosCommand[2] = 0x30;
+    escPosCommand[3] = 0; // Mode 0
+    escPosCommand[4] = xL;
+    escPosCommand[5] = xH;
+    escPosCommand[6] = yL;
+    escPosCommand[7] = yH;
+    escPosCommand.set(rasterBytes, 8);
+
+    stripes.push(escPosCommand);
+  }
+
+  return stripes;
+}
+
+/**
  * Builds standard test print commands in raster graphics mode
  */
 export function buildRasterTestReceipt(

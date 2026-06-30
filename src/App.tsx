@@ -30,7 +30,9 @@ import {
   Activity,
   Zap,
   Moon,
-  Eye
+  Eye,
+  EyeOff,
+  Key
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Capacitor } from "@capacitor/core";
@@ -44,7 +46,8 @@ import {
 } from "./utils/arabicShaper";
 import {
   drawReceiptToCanvas,
-  convertCanvasToEscPosRaster
+  convertCanvasToEscPosRaster,
+  convertCanvasToEscPosRasterStripes
 } from "./utils/rasterPrinter";
 
 export default function App() {
@@ -225,6 +228,16 @@ export default function App() {
   // GATT Write characteristic reference
   const [bleCharacteristic, setBleCharacteristic] = useState<any | null>(null);
   const [bleDevice, setBleDevice] = useState<any | null>(null);
+
+  // Gemini API Key User state
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
+    return localStorage.getItem("ai_p_gemini_api_key") || "";
+  });
+  const [showKey, setShowKey] = useState<boolean>(false);
+
+  useEffect(() => {
+    localStorage.setItem("ai_p_gemini_api_key", geminiApiKey);
+  }, [geminiApiKey]);
 
   // --- 4. Digital copy of printed receipts (History) & UI Tabs ---
   const [printedSlipsHistory, setPrintedSlipsHistory] = useState<PrintedSlip[]>([]);
@@ -627,15 +640,17 @@ export default function App() {
     appendSystemLogSlip("تم إلغاء اقتران الطابعة الحرارية وتعمل الآن في وضع الأرشفة الرقمية للقصاصات.");
   };
 
-  // Write commands in safe 20-byte chunks
+  // Write commands in safe 40-byte chunks with optimal 20ms timing
   const transmitBluetoothData = async (data: Uint8Array) => {
     if (!bleCharacteristic) return;
     const isNative = Capacitor.isNativePlatform();
 
+    const chunkSize = 40;
+    const delayMs = 20;
+
     if (isNative && bleDevice?.deviceId) {
-      const size = 20;
-      for (let i = 0; i < data.length; i += size) {
-        const chunk = data.slice(i, i + size);
+      for (let i = 0; i < data.length; i += chunkSize) {
+        const chunk = data.slice(i, i + chunkSize);
         // Convert to DataView for Capacitor write
         const chunkDataView = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
         await BleClient.write(
@@ -644,14 +659,13 @@ export default function App() {
           bleCharacteristic.characteristicUuid,
           chunkDataView
         );
-        await new Promise(resolve => setTimeout(resolve, 35));
+        await new Promise(resolve => setTimeout(resolve, delayMs));
       }
     } else {
-      const size = 20;
-      for (let i = 0; i < data.length; i += size) {
-        const chunk = data.slice(i, i + size);
+      for (let i = 0; i < data.length; i += chunkSize) {
+        const chunk = data.slice(i, i + chunkSize);
         await bleCharacteristic.writeValue(chunk);
-        await new Promise(resolve => setTimeout(resolve, 35));
+        await new Promise(resolve => setTimeout(resolve, delayMs));
       }
     }
   };
@@ -673,7 +687,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           plan: planInput,
-          localTime: currentFormattedTime
+          localTime: currentFormattedTime,
+          geminiApiKey: geminiApiKey
         })
       });
 
@@ -759,7 +774,6 @@ export default function App() {
 
       // 3. Physical printing command via Web Bluetooth
       if (printerSettings.connected && bleCharacteristic) {
-        let binaryCommands: Uint8Array;
         if (printerSettings.printMode === "raster") {
           // Determine standard width in dots (pixels) based on line width setting (32 characters -> 384px, 48 characters -> 576px)
           const pixelWidth = printerSettings.lineWidth === 48 ? 576 : 384;
@@ -773,9 +787,16 @@ export default function App() {
             printerSettings.footerText,
             pixelWidth
           );
-          binaryCommands = convertCanvasToEscPosRaster(canvas);
+          
+          // Slice into 40px height stripes to prevent BLE buffer overflow
+          const stripes = convertCanvasToEscPosRasterStripes(canvas, 40);
+          for (let i = 0; i < stripes.length; i++) {
+            await transmitBluetoothData(stripes[i]);
+            // Tiny delay between stripes for physical spool stability
+            await new Promise(resolve => setTimeout(resolve, 150));
+          }
         } else {
-          binaryCommands = buildEscPosReceipt(
+          const binaryCommands = buildEscPosReceipt(
             task.title,
             task.time,
             task.endTime,
@@ -786,8 +807,8 @@ export default function App() {
             printerSettings.headerText,
             printerSettings.footerText
           );
+          await transmitBluetoothData(binaryCommands);
         }
-        await transmitBluetoothData(binaryCommands);
       }
 
       // 4. Update Printed registry to avoid loops
@@ -986,7 +1007,6 @@ export default function App() {
 
     if (printerSettings.connected && bleCharacteristic) {
       // Create a basic testing command list
-      let commandBytes: Uint8Array;
       if (printerSettings.printMode === "raster") {
         const pixelWidth = printerSettings.lineWidth === 48 ? 576 : 384;
         const canvas = drawReceiptToCanvas(
@@ -999,9 +1019,14 @@ export default function App() {
           printerSettings.footerText,
           pixelWidth
         );
-        commandBytes = convertCanvasToEscPosRaster(canvas);
+        // Slice into 40px height stripes to prevent BLE buffer overflow
+        const stripes = convertCanvasToEscPosRasterStripes(canvas, 40);
+        for (let i = 0; i < stripes.length; i++) {
+          await transmitBluetoothData(stripes[i]);
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
       } else {
-        commandBytes = buildEscPosReceipt(
+        const commandBytes = buildEscPosReceipt(
           "اختبار الطابعة",
           "00:00",
           "00:00",
@@ -1012,8 +1037,8 @@ export default function App() {
           printerSettings.headerText,
           printerSettings.footerText
         );
+        await transmitBluetoothData(commandBytes);
       }
-      await transmitBluetoothData(commandBytes);
     }
     setSuccessMsg("تمت طباعة ورقة الاختبار والمحاكاة بنجاح.");
   };
@@ -1199,6 +1224,64 @@ export default function App() {
           {activeTab === "ai-planner" && (
             <div className="space-y-4 animate-fadeIn">
               
+              {/* Gemini API Key Section */}
+              <div className="bg-slate-50 border border-slate-200 rounded-3xl p-4.5 shadow-xs relative overflow-hidden flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="p-1.5 bg-amber-50 text-amber-600 rounded-lg border border-amber-150">
+                      <Key className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-800">إعداد مفتاح ذكاء Gemini</h4>
+                      <p className="text-[10px] text-slate-500">مطلوب لتشغيل جدولة وتصنيف الأنشطة تلقائياً</p>
+                    </div>
+                  </div>
+                  {geminiApiKey ? (
+                    <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-150 px-2 py-0.5 rounded-md flex items-center gap-1">
+                      <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />
+                      مفعّل محلياً ✦
+                    </span>
+                  ) : (
+                    <span className="text-[9px] font-bold text-rose-700 bg-rose-50 border border-rose-150 px-2 py-0.5 rounded-md flex items-center gap-1">
+                      <span className="w-1 h-1 rounded-full bg-rose-500" />
+                      غير مفعّل محلياً ⚠️
+                    </span>
+                  )}
+                </div>
+
+                <div className="relative flex items-center bg-white border border-slate-200 focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-500/10 rounded-2xl p-1.5 pr-2 transition-all">
+                  <input
+                    type={showKey ? "text" : "password"}
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    placeholder="أدخل مفتاح Gemini API Key هنا (AIzaSy...)"
+                    className="w-full bg-transparent text-xs text-slate-800 placeholder-slate-400 outline-hidden px-1.5 font-mono text-left"
+                    style={{ direction: "ltr" }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowKey(!showKey)}
+                    className="p-2 text-slate-400 hover:text-slate-600 transition-all mr-1"
+                    title={showKey ? "إخفاء المفتاح" : "عرض المفتاح"}
+                  >
+                    {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                
+                <div className="flex items-center justify-between text-[9px] text-slate-400 select-none">
+                  <span>* يُحفظ بشكل آمن وتلقائي في ذاكرة المتصفح المحلية فقط.</span>
+                  {geminiApiKey && (
+                    <button 
+                      type="button" 
+                      onClick={() => setGeminiApiKey("")}
+                      className="text-rose-500 hover:text-rose-700 font-bold underline transition-colors"
+                    >
+                      حذف المفتاح
+                    </button>
+                  )}
+                </div>
+              </div>
+
               {/* Main AI Box */}
               <div className="bg-gradient-to-b from-brand-50/50 to-white border border-brand-100 rounded-3xl p-5 relative overflow-hidden shadow-sm">
                 <div className="absolute top-0 left-0 w-24 h-24 bg-brand-500/5 rounded-full blur-2xl" />
