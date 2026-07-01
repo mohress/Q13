@@ -19,6 +19,10 @@ export interface PrinterSettings {
   autoPrintOnlyHigh: boolean;
   paperFeedLines: number;
   printMode: "text" | "raster";
+  bleChunkSize?: number; // Chunk size in bytes (e.g. 20, 40, 64)
+  bleDelayMs?: number; // Delay between chunks in ms
+  bleStripeMode?: "continuous" | "stripes"; // Printing graphics mode (all at once vs stripes)
+  bleStripeHeight?: number; // Height of each stripe if in stripes mode
 }
 
 export interface PrintedSlip {

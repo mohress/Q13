@@ -222,7 +222,11 @@ export default function App() {
     footerText: "عش يومك بشغف وإنجاز!",
     autoPrintOnlyHigh: false,
     paperFeedLines: 4,
-    printMode: "raster"
+    printMode: "raster",
+    bleChunkSize: 20, // 20 bytes is standard safe BLE MTU
+    bleDelayMs: 30, // 30ms is safe spacing for cheap micro-controllers
+    bleStripeMode: "continuous", // "continuous" prints smoothly without motor stuttering
+    bleStripeHeight: 40
   });
 
   // GATT Write characteristic reference
@@ -302,7 +306,11 @@ export default function App() {
           footerText: parsed.footerText ?? "عش يومك بشغف وإنجاز!",
           autoPrintOnlyHigh: parsed.autoPrintOnlyHigh ?? false,
           paperFeedLines: parsed.paperFeedLines ?? 4,
-          printMode: parsed.printMode ?? "raster"
+          printMode: parsed.printMode ?? "raster",
+          bleChunkSize: parsed.bleChunkSize ?? 20,
+          bleDelayMs: parsed.bleDelayMs ?? 30,
+          bleStripeMode: parsed.bleStripeMode ?? "continuous",
+          bleStripeHeight: parsed.bleStripeHeight ?? 40
         }));
       } catch (e) { console.error(e); }
     }
@@ -640,13 +648,13 @@ export default function App() {
     appendSystemLogSlip("تم إلغاء اقتران الطابعة الحرارية وتعمل الآن في وضع الأرشفة الرقمية للقصاصات.");
   };
 
-  // Write commands in safe 40-byte chunks with optimal 20ms timing
+  // Write commands in safe dynamic BLE chunks with configurable delay
   const transmitBluetoothData = async (data: Uint8Array) => {
     if (!bleCharacteristic) return;
     const isNative = Capacitor.isNativePlatform();
 
-    const chunkSize = 40;
-    const delayMs = 20;
+    const chunkSize = printerSettings.bleChunkSize || 20;
+    const delayMs = printerSettings.bleDelayMs !== undefined ? printerSettings.bleDelayMs : 30;
 
     if (isNative && bleDevice?.deviceId) {
       for (let i = 0; i < data.length; i += chunkSize) {
@@ -788,12 +796,19 @@ export default function App() {
             pixelWidth
           );
           
-          // Slice into 40px height stripes to prevent BLE buffer overflow
-          const stripes = convertCanvasToEscPosRasterStripes(canvas, 40);
-          for (let i = 0; i < stripes.length; i++) {
-            await transmitBluetoothData(stripes[i]);
-            // Tiny delay between stripes for physical spool stability
-            await new Promise(resolve => setTimeout(resolve, 150));
+          if (printerSettings.bleStripeMode === "stripes") {
+            // Slice into stripes to prevent BLE buffer overflow
+            const stripeHeight = printerSettings.bleStripeHeight || 40;
+            const stripes = convertCanvasToEscPosRasterStripes(canvas, stripeHeight);
+            for (let i = 0; i < stripes.length; i++) {
+              await transmitBluetoothData(stripes[i]);
+              // Tiny delay between stripes for physical spool stability
+              await new Promise(resolve => setTimeout(resolve, 150));
+            }
+          } else {
+            // Continuous printing (recommmend - produces smooth motor sound without stuttering)
+            const binaryCommands = convertCanvasToEscPosRaster(canvas);
+            await transmitBluetoothData(binaryCommands);
           }
         } else {
           const binaryCommands = buildEscPosReceipt(
@@ -1019,11 +1034,18 @@ export default function App() {
           printerSettings.footerText,
           pixelWidth
         );
-        // Slice into 40px height stripes to prevent BLE buffer overflow
-        const stripes = convertCanvasToEscPosRasterStripes(canvas, 40);
-        for (let i = 0; i < stripes.length; i++) {
-          await transmitBluetoothData(stripes[i]);
-          await new Promise(resolve => setTimeout(resolve, 150));
+        if (printerSettings.bleStripeMode === "stripes") {
+          // Slice into stripes to prevent BLE buffer overflow
+          const stripeHeight = printerSettings.bleStripeHeight || 40;
+          const stripes = convertCanvasToEscPosRasterStripes(canvas, stripeHeight);
+          for (let i = 0; i < stripes.length; i++) {
+            await transmitBluetoothData(stripes[i]);
+            await new Promise(resolve => setTimeout(resolve, 150));
+          }
+        } else {
+          // Continuous printing
+          const commandBytes = convertCanvasToEscPosRaster(canvas);
+          await transmitBluetoothData(commandBytes);
         }
       } else {
         const commandBytes = buildEscPosReceipt(
@@ -1997,6 +2019,138 @@ export default function App() {
                         <span className="text-[10.5px]">الطباعة النصية مباشرة</span>
                         <span className="text-[8px] font-medium text-slate-400">يرسل أحرف نصية مباشرة (تتطلب طابعة تدعم CP1256)</span>
                       </button>
+                    </div>
+                  </div>
+
+                  {/* Advanced Bluetooth Transmission Tuning */}
+                  <div className="pt-3.5 border-t border-slate-100 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] font-bold text-slate-500 block">إعدادات نقل بيانات البلوتوث المتقدمة ⚙️</label>
+                      <span className="text-[8px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-mono">
+                        معدل الحزمة: {printerSettings.bleChunkSize || 20}B / {printerSettings.bleDelayMs || 30}ms
+                      </span>
+                    </div>
+
+                    {/* Presets Selection */}
+                    <div className="bg-slate-50 border border-slate-150 rounded-2xl p-2.5 space-y-1.5">
+                      <span className="text-[9px] font-bold text-slate-400 block mb-0.5">الأنماط الجاهزة (Presets):</span>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setPrinterSettings(prev => ({
+                            ...prev,
+                            bleChunkSize: 20,
+                            bleDelayMs: 30,
+                            bleStripeMode: "continuous"
+                          }))}
+                          className={`py-1.5 px-1 rounded-xl border text-[9px] font-bold transition-all text-center leading-tight ${
+                            (printerSettings.bleChunkSize === 20 && printerSettings.bleDelayMs === 30 && printerSettings.bleStripeMode === "continuous")
+                              ? "border-emerald-600 bg-emerald-50 text-emerald-800 shadow-xs"
+                              : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+                          }`}
+                        >
+                          🛡️ أمان فائق
+                          <span className="block text-[7px] text-slate-400 font-normal">Generic / PT-210</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPrinterSettings(prev => ({
+                            ...prev,
+                            bleChunkSize: 40,
+                            bleDelayMs: 20,
+                            bleStripeMode: "continuous"
+                          }))}
+                          className={`py-1.5 px-1 rounded-xl border text-[9px] font-bold transition-all text-center leading-tight ${
+                            (printerSettings.bleChunkSize === 40 && printerSettings.bleDelayMs === 20 && printerSettings.bleStripeMode === "continuous")
+                              ? "border-brand-600 bg-brand-50 text-brand-800 shadow-xs"
+                              : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+                          }`}
+                        >
+                          ⚡ متوازن
+                          <span className="block text-[7px] text-slate-400 font-normal">Luck Jingle / 40B</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPrinterSettings(prev => ({
+                            ...prev,
+                            bleChunkSize: 120,
+                            bleDelayMs: 10,
+                            bleStripeMode: "continuous"
+                          }))}
+                          className={`py-1.5 px-1 rounded-xl border text-[9px] font-bold transition-all text-center leading-tight ${
+                            (printerSettings.bleChunkSize === 120 && printerSettings.bleDelayMs === 10 && printerSettings.bleStripeMode === "continuous")
+                              ? "border-amber-600 bg-amber-50 text-amber-800 shadow-xs"
+                              : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+                          }`}
+                        >
+                          🚀 سرعة قصوى
+                          <span className="block text-[7px] text-slate-400 font-normal">Premium 120B / 10ms</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Manual sliders */}
+                    <div className="space-y-2.5 bg-white border border-slate-150 rounded-2xl p-3">
+                      
+                      {/* Graphics split mode */}
+                      <div>
+                        <label className="text-[9px] font-bold text-slate-400 block mb-1">طريقة معالجة وتدفق الرسوميات</label>
+                        <select
+                          value={printerSettings.bleStripeMode || "continuous"}
+                          onChange={(e) => setPrinterSettings(prev => ({ ...prev, bleStripeMode: e.target.value as "continuous" | "stripes" }))}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[10px] text-slate-700 outline-hidden font-bold"
+                        >
+                          <option value="continuous">مستمر (ينصح به ✦ صوت ناعم وسلس بدون طقطقة)</option>
+                          <option value="stripes">مجزأ إلى شرائح (لمنع مشاكل الحجم الزائد)</option>
+                        </select>
+                      </div>
+
+                      {printerSettings.bleStripeMode === "stripes" && (
+                        <div>
+                          <label className="text-[9px] font-bold text-slate-400 block mb-1">ارتفاع الشريحة المطبوعة: {printerSettings.bleStripeHeight || 40} بكسل</label>
+                          <input
+                            type="range"
+                            min={20}
+                            max={120}
+                            step={10}
+                            value={printerSettings.bleStripeHeight || 40}
+                            onChange={(e) => setPrinterSettings(prev => ({ ...prev, bleStripeHeight: Number(e.target.value) }))}
+                            className="w-full accent-brand-600 h-1 bg-slate-100 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[9px] font-bold text-slate-400 block mb-1">حجم الحزمة: {printerSettings.bleChunkSize || 20} بايت</label>
+                          <input
+                            type="range"
+                            min={20}
+                            max={256}
+                            step={10}
+                            value={printerSettings.bleChunkSize || 20}
+                            onChange={(e) => setPrinterSettings(prev => ({ ...prev, bleChunkSize: Number(e.target.value) }))}
+                            className="w-full accent-brand-600 h-1 bg-slate-100 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-[9px] font-bold text-slate-400 block mb-1">تأخير الحزم: {printerSettings.bleDelayMs || 30} مل ثانية</label>
+                          <input
+                            type="range"
+                            min={5}
+                            max={100}
+                            step={5}
+                            value={printerSettings.bleDelayMs || 30}
+                            onChange={(e) => setPrinterSettings(prev => ({ ...prev, bleDelayMs: Number(e.target.value) }))}
+                            className="w-full accent-brand-600 h-1 bg-slate-100 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+                      </div>
+
+                      <p className="text-[8px] text-slate-400 text-center leading-normal pt-1 border-t border-dashed border-slate-100">
+                        * إذا كانت طابعتك تصدر صوت "طقطقة" أو اهتزاز متذبذب دون إخراج ورق، يرجى تفعيل وضع **مستمر**، وتعيين حجم الحزمة على **20 بايت** والتأخير على **30 مللي ثانية**.
+                      </p>
                     </div>
                   </div>
 
