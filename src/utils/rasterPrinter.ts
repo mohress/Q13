@@ -257,6 +257,158 @@ export function convertCanvasToEscPosRasterStripes(
 }
 
 /**
+ * Converts HTMLCanvasElement RGBA pixels to ESC/POS traditional bit-image commands (ESC * 33).
+ * This mode is extremely reliable and compatible with all low-cost portable BLE thermal printers
+ * (like PT-210, MPT-II, Luck Jingle, generic Chinese printers) that freeze or ignore standard raster graphics (GS v 0).
+ */
+export function convertCanvasToEscPosBitImage(canvas: HTMLCanvasElement): Uint8Array {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get 2D context");
+
+  const width = canvas.width;
+  const height = canvas.height;
+
+  const nL = width & 0xFF;
+  const nH = (width >> 8) & 0xFF;
+
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+
+  const isBlackPixel = (x: number, y: number): boolean => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return false;
+    const pixelIdx = (y * width + x) * 4;
+    const r = data[pixelIdx];
+    const g = data[pixelIdx + 1];
+    const b = data[pixelIdx + 2];
+    const a = data[pixelIdx + 3];
+
+    if (a < 40) return false;
+    const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+    return brightness < 150;
+  };
+
+  const commandList: number[] = [];
+
+  // Line spacing command to 0 to prevent gaps between 24-dot vertical rows
+  commandList.push(0x1B, 0x33, 0);
+
+  for (let y = 0; y < height; y += 24) {
+    // ESC * m nL nH
+    commandList.push(0x1B, 0x2A, 33, nL, nH);
+
+    for (let x = 0; x < width; x++) {
+      let byte1 = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        if (isBlackPixel(x, y + bit)) {
+          byte1 |= (1 << (7 - bit));
+        }
+      }
+      let byte2 = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        if (isBlackPixel(x, y + 8 + bit)) {
+          byte2 |= (1 << (7 - bit));
+        }
+      }
+      let byte3 = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        if (isBlackPixel(x, y + 16 + bit)) {
+          byte3 |= (1 << (7 - bit));
+        }
+      }
+
+      commandList.push(byte1, byte2, byte3);
+    }
+
+    // ESC J 24 (Print and feed paper 24 dots)
+    commandList.push(0x1B, 0x4A, 24);
+  }
+
+  // Restore default line spacing
+  commandList.push(0x1B, 0x32);
+
+  return new Uint8Array(commandList);
+}
+
+/**
+ * Converts HTMLCanvasElement RGBA pixels into sliced horizontal ESC/POS bit-image commands (ESC * 33).
+ * Slicing into 24-pixel vertical rows allows the printer to process and print one row at a time,
+ * preventing memory crashes and buffer overflows in low-cost BLE printers.
+ */
+export function convertCanvasToEscPosBitImageStripes(canvas: HTMLCanvasElement): Uint8Array[] {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get 2D context");
+
+  const width = canvas.width;
+  const height = canvas.height;
+
+  const nL = width & 0xFF;
+  const nH = (width >> 8) & 0xFF;
+
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+
+  const isBlackPixel = (x: number, y: number): boolean => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return false;
+    const pixelIdx = (y * width + x) * 4;
+    const r = data[pixelIdx];
+    const g = data[pixelIdx + 1];
+    const b = data[pixelIdx + 2];
+    const a = data[pixelIdx + 3];
+
+    if (a < 40) return false;
+    const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+    return brightness < 150;
+  };
+
+  const stripes: Uint8Array[] = [];
+
+  // Set line spacing to 0
+  const setLineSpacingZero = new Uint8Array([0x1B, 0x33, 0]);
+  stripes.push(setLineSpacingZero);
+
+  for (let y = 0; y < height; y += 24) {
+    const rowCmd: number[] = [];
+    
+    // ESC * m nL nH
+    rowCmd.push(0x1B, 0x2A, 33, nL, nH);
+
+    for (let x = 0; x < width; x++) {
+      let byte1 = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        if (isBlackPixel(x, y + bit)) {
+          byte1 |= (1 << (7 - bit));
+        }
+      }
+      let byte2 = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        if (isBlackPixel(x, y + 8 + bit)) {
+          byte2 |= (1 << (7 - bit));
+        }
+      }
+      let byte3 = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        if (isBlackPixel(x, y + 16 + bit)) {
+          byte3 |= (1 << (7 - bit));
+        }
+      }
+
+      rowCmd.push(byte1, byte2, byte3);
+    }
+
+    // ESC J 24 (Print and feed exactly 24 dots)
+    rowCmd.push(0x1B, 0x4A, 24);
+
+    stripes.push(new Uint8Array(rowCmd));
+  }
+
+  // Restore default line spacing
+  const restoreLineSpacing = new Uint8Array([0x1B, 0x32]);
+  stripes.push(restoreLineSpacing);
+
+  return stripes;
+}
+
+/**
  * Builds standard test print commands in raster graphics mode
  */
 export function buildRasterTestReceipt(

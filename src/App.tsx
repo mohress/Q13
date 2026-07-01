@@ -47,7 +47,9 @@ import {
 import {
   drawReceiptToCanvas,
   convertCanvasToEscPosRaster,
-  convertCanvasToEscPosRasterStripes
+  convertCanvasToEscPosRasterStripes,
+  convertCanvasToEscPosBitImage,
+  convertCanvasToEscPosBitImageStripes
 } from "./utils/rasterPrinter";
 
 export default function App() {
@@ -226,7 +228,9 @@ export default function App() {
     bleChunkSize: 20, // 20 bytes is standard safe BLE MTU
     bleDelayMs: 35, // 35ms is standard safe delay
     bleStripeMode: "stripes", // Slicing is essential for physical printers to prevent buffer overflow
-    bleStripeHeight: 16 // 16px is extremely safe (total size < 1KB) to prevent motor stalling
+    bleStripeHeight: 16, // 16px is extremely safe (total size < 1KB) to prevent motor stalling
+    graphicsProtocol: "esc_asterisk", // Default to ultra-compatible ESC * mode
+    hasCutter: false // Disabled by default for cheap portable printers to prevent lockups
   });
 
   // GATT Write characteristic reference
@@ -490,7 +494,10 @@ export default function App() {
           optionalServices: [
             "000018f0-0000-1000-8000-00805f9b34fb", // Standard ESC/POS
             "0000ff00-0000-1000-8000-00805f9b34fb", // Goojprt / Paperang
-            "e7e1a000-012c-11e2-892e-0800200c9a66"  // Portable print service
+            "0000ffe0-0000-1000-8000-00805f9b34fb", // HM-10 (Very common for cheap printers)
+            "49535343-fe7d-4ae5-8fa9-9fafd205e455", // ISSC serial SPP (Common budget bridge)
+            "0000fee7-0000-1000-8000-00805f9b34fb", // WeChat/Tencent Mini printer
+            "e7e1a000-012c-11e2-892e-0800200c9a66"  // Portable print service (Luck Jingle, Jp-q2, etc)
           ]
         });
 
@@ -565,7 +572,10 @@ export default function App() {
           optionalServices: [
             "000018f0-0000-1000-8000-00805f9b34fb", // Standard ESC/POS
             "0000ff00-0000-1000-8000-00805f9b34fb", // Goojprt / Paperang
-            "e7e1a000-012c-11e2-892e-0800200c9a66"  // Portable print service
+            "0000ffe0-0000-1000-8000-00805f9b34fb", // HM-10 (Very common for cheap printers)
+            "49535343-fe7d-4ae5-8fa9-9fafd205e455", // ISSC serial SPP (Common budget bridge)
+            "0000fee7-0000-1000-8000-00805f9b34fb", // WeChat/Tencent Mini printer
+            "e7e1a000-012c-11e2-892e-0800200c9a66"  // Portable print service (Luck Jingle, Jp-q2, etc)
           ]
         });
 
@@ -864,19 +874,35 @@ export default function App() {
             pixelWidth
           );
           
-          if (printerSettings.bleStripeMode === "stripes") {
-            // Slice into stripes to prevent BLE buffer overflow
-            const stripeHeight = printerSettings.bleStripeHeight || 16;
-            const stripes = convertCanvasToEscPosRasterStripes(canvas, stripeHeight);
-            for (let i = 0; i < stripes.length; i++) {
-              await transmitBluetoothData(stripes[i]);
-              // Tiny delay between stripes for physical spool stability
-              await new Promise(resolve => setTimeout(resolve, 150));
+          if (printerSettings.graphicsProtocol === "esc_asterisk") {
+            if (printerSettings.bleStripeMode === "stripes") {
+              // Slices into compatible 24px columns
+              const stripes = convertCanvasToEscPosBitImageStripes(canvas);
+              for (let i = 0; i < stripes.length; i++) {
+                await transmitBluetoothData(stripes[i]);
+                // Motor speed sync delay
+                await new Promise(resolve => setTimeout(resolve, 80));
+              }
+            } else {
+              const binaryCommands = convertCanvasToEscPosBitImage(canvas);
+              await transmitBluetoothData(binaryCommands);
             }
           } else {
-            // Continuous printing (produces smooth motor sound)
-            const binaryCommands = convertCanvasToEscPosRaster(canvas);
-            await transmitBluetoothData(binaryCommands);
+            // Standard Raster GS v 0
+            if (printerSettings.bleStripeMode === "stripes") {
+              // Slice into stripes to prevent BLE buffer overflow
+              const stripeHeight = printerSettings.bleStripeHeight || 16;
+              const stripes = convertCanvasToEscPosRasterStripes(canvas, stripeHeight);
+              for (let i = 0; i < stripes.length; i++) {
+                await transmitBluetoothData(stripes[i]);
+                // Tiny delay between stripes for physical spool stability
+                await new Promise(resolve => setTimeout(resolve, 150));
+              }
+            } else {
+              // Continuous printing (produces smooth motor sound)
+              const binaryCommands = convertCanvasToEscPosRaster(canvas);
+              await transmitBluetoothData(binaryCommands);
+            }
           }
         } else {
           const binaryCommands = buildEscPosReceipt(
@@ -893,13 +919,19 @@ export default function App() {
           await transmitBluetoothData(binaryCommands);
         }
 
-        // Add paper feed and cut at the end to push the printed slip out of the cutter mouth
+        // Add paper feed and cut at the end to push the printed slip out
         const feedLines = printerSettings.paperFeedLines !== undefined ? printerSettings.paperFeedLines : 4;
-        const endCmd = new Uint8Array([
-          0x1B, 0x64, feedLines, // ESC d n (Print and feed n lines)
-          0x1D, 0x56, 66, 0      // GS V 66 0 (Half cut or full cut)
+        const feedCmd = new Uint8Array([
+          0x1B, 0x64, feedLines // ESC d n (Print and feed n lines)
         ]);
-        await transmitBluetoothData(endCmd);
+        await transmitBluetoothData(feedCmd);
+
+        if (printerSettings.hasCutter) {
+          const cutCmd = new Uint8Array([
+            0x1D, 0x56, 66, 0 // GS V 66 0 (Half cut or full cut)
+          ]);
+          await transmitBluetoothData(cutCmd);
+        }
       }
 
       // 4. Update Printed registry to avoid loops
@@ -1114,18 +1146,32 @@ export default function App() {
           printerSettings.footerText,
           pixelWidth
         );
-        if (printerSettings.bleStripeMode === "stripes") {
-          // Slice into stripes to prevent BLE buffer overflow
-          const stripeHeight = printerSettings.bleStripeHeight || 16;
-          const stripes = convertCanvasToEscPosRasterStripes(canvas, stripeHeight);
-          for (let i = 0; i < stripes.length; i++) {
-            await transmitBluetoothData(stripes[i]);
-            await new Promise(resolve => setTimeout(resolve, 150));
+        if (printerSettings.graphicsProtocol === "esc_asterisk") {
+          if (printerSettings.bleStripeMode === "stripes") {
+            const stripes = convertCanvasToEscPosBitImageStripes(canvas);
+            for (let i = 0; i < stripes.length; i++) {
+              await transmitBluetoothData(stripes[i]);
+              await new Promise(resolve => setTimeout(resolve, 80));
+            }
+          } else {
+            const commandBytes = convertCanvasToEscPosBitImage(canvas);
+            await transmitBluetoothData(commandBytes);
           }
         } else {
-          // Continuous printing
-          const commandBytes = convertCanvasToEscPosRaster(canvas);
-          await transmitBluetoothData(commandBytes);
+          // Standard Raster GS v 0
+          if (printerSettings.bleStripeMode === "stripes") {
+            // Slice into stripes to prevent BLE buffer overflow
+            const stripeHeight = printerSettings.bleStripeHeight || 16;
+            const stripes = convertCanvasToEscPosRasterStripes(canvas, stripeHeight);
+            for (let i = 0; i < stripes.length; i++) {
+              await transmitBluetoothData(stripes[i]);
+              await new Promise(resolve => setTimeout(resolve, 150));
+            }
+          } else {
+            // Continuous printing
+            const commandBytes = convertCanvasToEscPosRaster(canvas);
+            await transmitBluetoothData(commandBytes);
+          }
         }
       } else {
         const commandBytes = buildEscPosReceipt(
@@ -1142,13 +1188,19 @@ export default function App() {
         await transmitBluetoothData(commandBytes);
       }
 
-      // Add paper feed and cut at the end to push the printed slip out of the cutter mouth
+      // Add paper feed and cut at the end to push the printed slip out
       const feedLines = printerSettings.paperFeedLines !== undefined ? printerSettings.paperFeedLines : 4;
-      const endCmd = new Uint8Array([
-        0x1B, 0x64, feedLines, // ESC d n (Print and feed n lines)
-        0x1D, 0x56, 66, 0      // GS V 66 0 (Half cut or full cut)
+      const feedCmd = new Uint8Array([
+        0x1B, 0x64, feedLines // ESC d n (Print and feed n lines)
       ]);
-      await transmitBluetoothData(endCmd);
+      await transmitBluetoothData(feedCmd);
+
+      if (printerSettings.hasCutter) {
+        const cutCmd = new Uint8Array([
+          0x1D, 0x56, 66, 0 // GS V 66 0 (Half cut or full cut)
+        ]);
+        await transmitBluetoothData(cutCmd);
+      }
     }
     setSuccessMsg("تمت طباعة ورقة الاختبار والمحاكاة بنجاح.");
   };
@@ -2130,16 +2182,18 @@ export default function App() {
                             bleChunkSize: 20,
                             bleDelayMs: 35,
                             bleStripeMode: "stripes",
-                            bleStripeHeight: 16
+                            bleStripeHeight: 16,
+                            graphicsProtocol: "esc_asterisk",
+                            hasCutter: false
                           }))}
                           className={`py-1.5 px-1 rounded-xl border text-[9px] font-bold transition-all text-center leading-tight ${
-                            (printerSettings.bleChunkSize === 20 && printerSettings.bleDelayMs === 35 && printerSettings.bleStripeMode === "stripes" && printerSettings.bleStripeHeight === 16)
+                            (printerSettings.bleChunkSize === 20 && printerSettings.bleDelayMs === 35 && printerSettings.bleStripeMode === "stripes" && printerSettings.bleStripeHeight === 16 && printerSettings.graphicsProtocol === "esc_asterisk")
                               ? "border-emerald-600 bg-emerald-50 text-emerald-800 shadow-xs"
                               : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
                           }`}
                         >
                           🛡️ أمان فائق (مستحسن)
-                          <span className="block text-[7px] text-slate-400 font-normal">Slices 16px / 20B / 35ms</span>
+                          <span className="block text-[7px] text-slate-400 font-normal">Slices 16px / ESC* / 20B / 35ms</span>
                         </button>
                         <button
                           type="button"
@@ -2148,16 +2202,18 @@ export default function App() {
                             bleChunkSize: 40,
                             bleDelayMs: 25,
                             bleStripeMode: "stripes",
-                            bleStripeHeight: 32
+                            bleStripeHeight: 32,
+                            graphicsProtocol: "esc_asterisk",
+                            hasCutter: false
                           }))}
                           className={`py-1.5 px-1 rounded-xl border text-[9px] font-bold transition-all text-center leading-tight ${
-                            (printerSettings.bleChunkSize === 40 && printerSettings.bleDelayMs === 25 && printerSettings.bleStripeMode === "stripes" && printerSettings.bleStripeHeight === 32)
+                            (printerSettings.bleChunkSize === 40 && printerSettings.bleDelayMs === 25 && printerSettings.bleStripeMode === "stripes" && printerSettings.bleStripeHeight === 32 && printerSettings.graphicsProtocol === "esc_asterisk")
                               ? "border-brand-600 bg-brand-50 text-brand-800 shadow-xs"
                               : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
                           }`}
                         >
                           ⚡ متوازن
-                          <span className="block text-[7px] text-slate-400 font-normal">Slices 32px / 40B / 25ms</span>
+                          <span className="block text-[7px] text-slate-400 font-normal">Slices 32px / ESC* / 40B / 25ms</span>
                         </button>
                         <button
                           type="button"
@@ -2166,16 +2222,17 @@ export default function App() {
                             bleChunkSize: 120,
                             bleDelayMs: 15,
                             bleStripeMode: "continuous",
-                            bleStripeHeight: 48
+                            graphicsProtocol: "gs_v_0",
+                            hasCutter: false
                           }))}
                           className={`py-1.5 px-1 rounded-xl border text-[9px] font-bold transition-all text-center leading-tight ${
-                            (printerSettings.bleChunkSize === 120 && printerSettings.bleDelayMs === 15 && printerSettings.bleStripeMode === "continuous")
+                            (printerSettings.bleChunkSize === 120 && printerSettings.bleDelayMs === 15 && printerSettings.bleStripeMode === "continuous" && printerSettings.graphicsProtocol === "gs_v_0")
                               ? "border-amber-600 bg-amber-50 text-amber-800 shadow-xs"
                               : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
                           }`}
                         >
                           🚀 سرعة قصوى
-                          <span className="block text-[7px] text-slate-400 font-normal">Continuous / 120B / 15ms</span>
+                          <span className="block text-[7px] text-slate-400 font-normal">GS v 0 / 120B / 15ms</span>
                         </button>
                       </div>
                     </div>
@@ -2183,6 +2240,19 @@ export default function App() {
                     {/* Manual sliders */}
                     <div className="space-y-2.5 bg-white border border-slate-150 rounded-2xl p-3">
                       
+                      {/* Graphics Protocol selector */}
+                      <div>
+                        <label className="text-[9px] font-bold text-slate-400 block mb-1">بروتوكول معالجة الرسوميات (Graphics Protocol)</label>
+                        <select
+                          value={printerSettings.graphicsProtocol || "esc_asterisk"}
+                          onChange={(e) => setPrinterSettings(prev => ({ ...prev, graphicsProtocol: e.target.value as "gs_v_0" | "esc_asterisk" }))}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[10px] text-slate-700 outline-hidden font-bold"
+                        >
+                          <option value="esc_asterisk">نمط الصور التقليدي (ESC * 33) ✦ متوافق 100% مع الطابعات المحمولة الاقتصادية</option>
+                          <option value="gs_v_0">نمط الرسوميات السريع (GS v 0) - مخصص للطابعات المكتبية الاحترافية الكبيرة</option>
+                        </select>
+                      </div>
+
                       {/* Graphics split mode */}
                       <div>
                         <label className="text-[9px] font-bold text-slate-400 block mb-1">طريقة معالجة وتدفق الرسوميات</label>
@@ -2239,8 +2309,27 @@ export default function App() {
                         </div>
                       </div>
 
+                      {/* Cutter Enable Toggle */}
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                        <div className="flex flex-col">
+                          <span className="text-[10px] font-bold text-slate-700">تفعيل سكين قص الورق التلقائي (Auto Cutter)</span>
+                          <span className="text-[8px] text-slate-400">⚠️ عطل هذا الخيار للطابعات الصغيرة والمحمولة (تجنباً للتجميد)</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setPrinterSettings(prev => ({ ...prev, hasCutter: !prev.hasCutter }))}
+                          className={`w-9 h-5 rounded-full relative transition-all ${
+                            printerSettings.hasCutter ? "bg-emerald-600" : "bg-slate-200"
+                          }`}
+                        >
+                          <div className={`w-3.5 h-3.5 bg-white rounded-full absolute top-0.75 transition-all ${
+                            printerSettings.hasCutter ? "right-1" : "right-4.5"
+                          }`} />
+                        </button>
+                      </div>
+
                       <p className="text-[8.5px] text-rose-600 bg-rose-50/50 border border-rose-100 rounded-xl p-2 leading-relaxed text-center font-medium">
-                        ⚠️ **ملاحظة حل مشكلة طنين أو اهتزاز الطابعة**: إذا كانت طابعتك تصدر صوت اهتزاز متذبذب أو لا تخرج ورقاً، فهذا نتيجة امتلاء ذاكرتها (Buffer Overflow). **الحل هو اختيار نمط "أمان فائق (مستحسن)" الجاهز أعلاه**، والذي يقسم الطباعة إلى شرائح متناهية الصغر بمقاس 16 بكسل لتتمكن الطابعة من معالجتها بسلاسة بالغة ودون توقف.
+                        ⚠️ **ملاحظة حل مشكلة طنين أو اهتزاز الطابعة**: إذا كانت طابعتك تصدر صوت اهتزاز متذبذب أو لا تخرج ورقاً، فهذا نتيجة امتلاء ذاكرتها (Buffer Overflow) أو إرسال أمر سكين القص الذي لا تدعمه الطابعات المحمولة. **الحل هو تفعيل نمط الصور التقليدي (ESC * 33) وتعطيل سكين قص الورق التلقائي.**
                       </p>
                     </div>
                   </div>
