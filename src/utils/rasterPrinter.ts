@@ -106,14 +106,15 @@ export function drawReceiptToCanvas(
   // Tiny bottom feed spacing for clean cutter tear
   y += 12;
 
-  // Create precise cropped final canvas
+  // Create precise cropped final canvas padded to multiple of 8
+  const paddedHeight = Math.ceil(y / 8) * 8;
   const finalCanvas = document.createElement("canvas");
   finalCanvas.width = width;
-  finalCanvas.height = y;
+  finalCanvas.height = paddedHeight;
   const finalCtx = finalCanvas.getContext("2d");
   if (finalCtx) {
     finalCtx.fillStyle = "#FFFFFF";
-    finalCtx.fillRect(0, 0, width, y);
+    finalCtx.fillRect(0, 0, width, paddedHeight);
     finalCtx.drawImage(canvasTemp, 0, 0, width, y, 0, 0, width, y);
   }
 
