@@ -23,7 +23,7 @@ export interface PrinterSettings {
   bleDelayMs?: number; // Delay between chunks in ms
   bleStripeMode?: "continuous" | "stripes"; // Printing graphics mode (all at once vs stripes)
   bleStripeHeight?: number; // Height of each stripe if in stripes mode
-  graphicsProtocol?: "gs_v_0" | "esc_asterisk"; // Standard Raster vs Legacy Bit Image
+  graphicsProtocol?: "gs_v_0" | "esc_asterisk" | "esc_asterisk_8"; // Standard Raster vs Legacy Bit Image (24-dot/8-dot)
   hasCutter?: boolean; // Set to true if the printer has a physical automatic cutter
 }
 

@@ -362,14 +362,14 @@ export function convertCanvasToEscPosBitImageStripes(canvas: HTMLCanvasElement):
 
   const stripes: Uint8Array[] = [];
 
-  // Set line spacing to 0
-  const setLineSpacingZero = new Uint8Array([0x1B, 0x33, 0]);
-  stripes.push(setLineSpacingZero);
+  // Set line spacing to 24 dots (ESC 3 24) to avoid line overlap or blank gaps
+  const setLineSpacing24 = new Uint8Array([0x1B, 0x33, 24]);
+  stripes.push(setLineSpacing24);
 
   for (let y = 0; y < height; y += 24) {
     const rowCmd: number[] = [];
     
-    // ESC * m nL nH
+    // ESC * m nL nH (m = 33 is 24-dot double-density)
     rowCmd.push(0x1B, 0x2A, 33, nL, nH);
 
     for (let x = 0; x < width; x++) {
@@ -395,13 +395,80 @@ export function convertCanvasToEscPosBitImageStripes(canvas: HTMLCanvasElement):
       rowCmd.push(byte1, byte2, byte3);
     }
 
-    // ESC J 24 (Print and feed exactly 24 dots)
-    rowCmd.push(0x1B, 0x4A, 24);
+    // Line Feed (0x0A) prints the loaded 24-dot line and feeds by 24 dots line-spacing
+    rowCmd.push(0x0A);
 
     stripes.push(new Uint8Array(rowCmd));
   }
 
-  // Restore default line spacing
+  // Restore default line spacing (ESC 2)
+  const restoreLineSpacing = new Uint8Array([0x1B, 0x32]);
+  stripes.push(restoreLineSpacing);
+
+  return stripes;
+}
+
+/**
+ * Converts HTMLCanvasElement RGBA pixels into 8-dot traditional bit-image commands (ESC * 1).
+ * This is the ultimate fallback mode with 100% compatibility across all budget/portable thermal printers (like Luck Jingle, PT-210, MPT-II).
+ * Each command contains only 384 bytes of graphics data (for 58mm paper), requiring minimal printer buffer,
+ * entirely preventing buffer lockups or timing out during transmission.
+ */
+export function convertCanvasToEscPosBitImage8Dot(canvas: HTMLCanvasElement): Uint8Array[] {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get 2D context");
+
+  const width = canvas.width;
+  const height = canvas.height;
+
+  const nL = width & 0xFF;
+  const nH = (width >> 8) & 0xFF;
+
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+
+  const isBlackPixel = (x: number, y: number): boolean => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return false;
+    const pixelIdx = (y * width + x) * 4;
+    const r = data[pixelIdx];
+    const g = data[pixelIdx + 1];
+    const b = data[pixelIdx + 2];
+    const a = data[pixelIdx + 3];
+
+    if (a < 40) return false;
+    const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+    return brightness < 150;
+  };
+
+  const stripes: Uint8Array[] = [];
+
+  // Set line spacing to 8 dots (ESC 3 8)
+  const setLineSpacing8 = new Uint8Array([0x1B, 0x33, 8]);
+  stripes.push(setLineSpacing8);
+
+  for (let y = 0; y < height; y += 8) {
+    const rowCmd: number[] = [];
+    
+    // ESC * m nL nH (m = 1 is 8-dot double density)
+    rowCmd.push(0x1B, 0x2A, 1, nL, nH);
+
+    for (let x = 0; x < width; x++) {
+      let byteVal = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        if (isBlackPixel(x, y + bit)) {
+          byteVal |= (1 << (7 - bit));
+        }
+      }
+      rowCmd.push(byteVal);
+    }
+
+    // Line Feed (0x0A) prints the 8-dot row and feeds 8 dots
+    rowCmd.push(0x0A);
+
+    stripes.push(new Uint8Array(rowCmd));
+  }
+
+  // Restore default line spacing (ESC 2)
   const restoreLineSpacing = new Uint8Array([0x1B, 0x32]);
   stripes.push(restoreLineSpacing);
 

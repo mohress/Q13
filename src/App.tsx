@@ -49,7 +49,8 @@ import {
   convertCanvasToEscPosRaster,
   convertCanvasToEscPosRasterStripes,
   convertCanvasToEscPosBitImage,
-  convertCanvasToEscPosBitImageStripes
+  convertCanvasToEscPosBitImageStripes,
+  convertCanvasToEscPosBitImage8Dot
 } from "./utils/rasterPrinter";
 
 export default function App() {
@@ -65,6 +66,7 @@ export default function App() {
   const [isSilentLoopActive, setIsSilentLoopActive] = useState<boolean>(false);
   const wakeLockRef = useRef<any>(null);
   const silentIntervalRef = useRef<any>(null);
+  const silentSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   // --- PWA Standalone Installation & WebView Bypass Guides ---
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -126,7 +128,7 @@ export default function App() {
     }
   };
 
-  // --- Silent Audio Loop Keep-Alive (OS Background Exclusion) ---
+  // --- Silent Audio Loop Keep-Alive (OS Background Exclusion with Native Audio Thread Looping & MediaSession Registration) ---
   const startSilentAudioLoop = () => {
     try {
       if (!audioCtxRef.current) {
@@ -138,35 +140,79 @@ export default function App() {
         ctx.resume();
       }
       
-      // Stop existing loop if any
+      // Stop existing looping audio node if active
+      if (silentSourceRef.current) {
+        try {
+          silentSourceRef.current.stop();
+        } catch (e) {
+          console.warn("Stopping previous silent audio source failed:", e);
+        }
+        silentSourceRef.current = null;
+      }
+
+      // Stop backup interval if running
       if (silentIntervalRef.current) {
         clearInterval(silentIntervalRef.current);
         silentIntervalRef.current = null;
       }
 
-      // Create a 2-second buffer of absolute silence with ultra-subtle signal to keep the audio hardware hot
+      // Create a 2-second buffer of absolute silence with extremely subtle signal (1/1000th of standard sound)
+      // This is perfectly inaudible to human ears but registers as active audio streaming to the OS
       const bufferSize = ctx.sampleRate * 2;
       const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
       const channelData = buffer.getChannelData(0);
       for (let i = 0; i < bufferSize; i++) {
-        channelData[i] = (Math.random() * 2 - 1) * 0.000005; // Humanly inaudible, but keeps audio stream active
+        channelData[i] = (Math.random() * 2 - 1) * 0.000002;
       }
 
-      const playLoop = () => {
-        const source = ctx.createBufferSource();
-        source.buffer = buffer;
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.005, ctx.currentTime);
-        source.connect(gain);
-        gain.connect(ctx.destination);
-        source.start();
-      };
+      // Create Buffer Source Node
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.loop = true; // Loop natively on the device's hardware audio thread! No JS interval required.
 
-      playLoop();
-      silentIntervalRef.current = setInterval(playLoop, 1950);
+      // Custom gain node for safety
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.005, ctx.currentTime);
+      source.connect(gain);
+      gain.connect(ctx.destination);
+
+      source.start(0);
+      silentSourceRef.current = source;
+
+      // --- Web Media Session API Registration (Bulletproof OS Awake Hack) ---
+      const nav = navigator as any;
+      if ('mediaSession' in nav) {
+        try {
+          nav.mediaSession.metadata = new MediaMetadata({
+            title: "رادار الحفاظ على نشاط المعالج ✦",
+            artist: "الطباعة التلقائية المستمرة بالخلفية",
+            album: "AISTUDIO BLE-58T Engine",
+            artwork: [
+              { src: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=128&auto=format&fit=crop", sizes: "128x128", type: "image/jpeg" }
+            ]
+          });
+
+          // Declare active playback to OS
+          nav.mediaSession.playbackState = "playing";
+
+          // Handle play/pause commands from phone lockscreen to maintain active status
+          nav.mediaSession.setActionHandler('play', () => {
+            if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+              audioCtxRef.current.resume();
+            }
+            nav.mediaSession.playbackState = "playing";
+          });
+          nav.mediaSession.setActionHandler('pause', () => {
+            nav.mediaSession.playbackState = "paused";
+          });
+        } catch (mediaErr) {
+          console.warn("Media Session API metadata setup partially restricted:", mediaErr);
+        }
+      }
+
       setIsSilentLoopActive(true);
-      setSuccessMsg("تم تشغيل رادار اليقظة بالخلفية لمنع تجميد المجدول بنجاح ✓");
-      appendSystemLogSlip("تم تنشيط Background Audio Loop للتأكد من عدم تجميد العمليات عند قفل الشاشة.");
+      setSuccessMsg("تم تفعيل رادار اليقظة اللاسلكي الفاخر بالخلفية! يعمل الآن على مستوى معالج الصوت بالهاتف حتى والشاشة مغلقة ✓");
+      appendSystemLogSlip("تم تنشيط Background Audio Loop + MediaSession بنجاح لحماية اتصال البلوتوث والمجدول من تجميد المعالج.");
     } catch (e: any) {
       console.error(e);
       setError("فشل تفعيل رادار اليقظة الصوتية: " + e.message);
@@ -174,13 +220,35 @@ export default function App() {
   };
 
   const stopSilentAudioLoop = () => {
+    // Stop looping node
+    if (silentSourceRef.current) {
+      try {
+        silentSourceRef.current.stop();
+      } catch (e) {
+        console.warn("Stopping silent source failed:", e);
+      }
+      silentSourceRef.current = null;
+    }
+
+    // Stop backup interval if any
     if (silentIntervalRef.current) {
       clearInterval(silentIntervalRef.current);
       silentIntervalRef.current = null;
     }
+
+    // De-register MediaSession playback state
+    const nav = navigator as any;
+    if ('mediaSession' in nav) {
+      try {
+        nav.mediaSession.playbackState = "none";
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
     setIsSilentLoopActive(false);
     setSuccessMsg("تم إيقاف رادار اليقظة الصوتية بنجاح.");
-    appendSystemLogSlip("تم إيقاف رادار اليقظة الصوتية (Background Audio Loop). قد يتجمد التطبيق إذا انطفأت الشاشة.");
+    appendSystemLogSlip("تم إيقاف رادار اليقظة الصوتية. الهاتف قد يجمد العمليات اللاسلكية فور انطفاء الشاشة.");
   };
 
   // Re-acquire Wake Lock when visibility changes
@@ -203,6 +271,13 @@ export default function App() {
     return () => {
       if (silentIntervalRef.current) {
         clearInterval(silentIntervalRef.current);
+      }
+      if (silentSourceRef.current) {
+        try {
+          silentSourceRef.current.stop();
+        } catch (e) {
+          console.warn("Stopping silent source on unmount failed:", e);
+        }
       }
     };
   }, []);
@@ -229,7 +304,7 @@ export default function App() {
     bleDelayMs: 35, // 35ms is standard safe delay
     bleStripeMode: "stripes", // Slicing is essential for physical printers to prevent buffer overflow
     bleStripeHeight: 16, // 16px is extremely safe (total size < 1KB) to prevent motor stalling
-    graphicsProtocol: "esc_asterisk", // Default to ultra-compatible ESC * mode
+    graphicsProtocol: "esc_asterisk_8", // Default to ultra-compatible 8-dot ESC * 1 mode for maximum BLE compatibility
     hasCutter: false // Disabled by default for cheap portable printers to prevent lockups
   });
 
@@ -341,19 +416,92 @@ export default function App() {
     localStorage.setItem("ai_p_settings", JSON.stringify(printerSettings));
   }, [printerSettings]);
 
-  // --- Time Tick Engine (Real Actual Time) ---
+  // --- Time Tick Engine (Real Actual Time with Background Web Worker support) ---
   useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 1000);
-    return () => clearInterval(interval);
+    let worker: Worker | null = null;
+    let interval: any = null;
+
+    try {
+      const workerCode = `
+        let timer = null;
+        self.onmessage = function(e) {
+          if (e.data === 'start') {
+            if (timer) clearInterval(timer);
+            timer = setInterval(() => {
+              self.postMessage('tick');
+            }, 1000);
+          } else if (e.data === 'stop') {
+            if (timer) {
+              clearInterval(timer);
+              timer = null;
+            }
+          }
+        };
+      `;
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const workerUrl = URL.createObjectURL(blob);
+      worker = new Worker(workerUrl);
+      
+      worker.onmessage = (e) => {
+        if (e.data === 'tick') {
+          setCurrentTime(new Date());
+        }
+      };
+      
+      worker.postMessage('start');
+      console.log("Background Web Worker Timer initiated successfully.");
+    } catch (err) {
+      console.warn("Web Worker not supported or blocked, falling back to standard interval:", err);
+      interval = setInterval(() => {
+        setCurrentTime(new Date());
+      }, 1000);
+    }
+
+    return () => {
+      if (worker) {
+        worker.postMessage('stop');
+        worker.terminate();
+      }
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
   }, []);
+
+  // --- Daily Printed & Completed Registry Reset ---
+  useEffect(() => {
+    const todayStr = currentTime.toDateString();
+    const savedLastDate = localStorage.getItem("ai_p_last_print_date");
+    if (savedLastDate && savedLastDate !== todayStr) {
+      // It's a new day! Clear the printed & completed lists so today's runs can print fresh
+      setPrintedTaskIds([]);
+      setCompletedTaskIds([]);
+      localStorage.setItem("ai_p_last_print_date", todayStr);
+      localStorage.setItem("ai_p_printed", JSON.stringify([]));
+      localStorage.setItem("ai_p_completed", JSON.stringify([]));
+      console.log("New day detected! Resetting printed & completed registries.");
+    } else if (!savedLastDate) {
+      localStorage.setItem("ai_p_last_print_date", todayStr);
+    }
+  }, [currentTime]);
 
   const currentFormattedTime = useMemo(() => {
     const hours = String(currentTime.getHours()).padStart(2, "0");
     const minutes = String(currentTime.getMinutes()).padStart(2, "0");
     return `${hours}:${minutes}`;
   }, [currentTime]);
+
+  // Helper to calculate difference in minutes between two 24h formatted times
+  const getMinutesDiff = (time1Str: string, time2Str: string): number => {
+    try {
+      const [h1, m1] = time1Str.split(":").map(Number);
+      const [h2, m2] = time2Str.split(":").map(Number);
+      if (isNaN(h1) || isNaN(m1) || isNaN(h2) || isNaN(m2)) return 0;
+      return (h2 * 60 + m2) - (h1 * 60 + m1);
+    } catch (e) {
+      return 0;
+    }
+  };
 
   // --- Chronological Indicators ---
   const activeTask = useMemo(() => {
@@ -373,10 +521,12 @@ export default function App() {
   useEffect(() => {
     if (tasks.length === 0) return;
 
-    // Check if there is any active task right now whose time has arrived/passed and hasn't been printed yet
+    // Check for any task whose time has arrived and is either active or started within the last 60 minutes
     const matchingTask = tasks.find(t => {
       const isCurrentlyActive = currentFormattedTime >= t.time && currentFormattedTime < t.endTime;
-      return isCurrentlyActive;
+      const diff = getMinutesDiff(t.time, currentFormattedTime);
+      const isWithinCatchUpWindow = diff >= 0 && diff <= 60; // 60 minutes grace period
+      return isCurrentlyActive || isWithinCatchUpWindow;
     });
 
     if (matchingTask) {
@@ -874,7 +1024,15 @@ export default function App() {
             pixelWidth
           );
           
-          if (printerSettings.graphicsProtocol === "esc_asterisk") {
+          if (printerSettings.graphicsProtocol === "esc_asterisk_8") {
+            // Ultimate fallback 8-dot traditional bit-image slices
+            const stripes = convertCanvasToEscPosBitImage8Dot(canvas);
+            for (let i = 0; i < stripes.length; i++) {
+              await transmitBluetoothData(stripes[i]);
+              // Safe transmission delay between 8-dot rows
+              await new Promise(resolve => setTimeout(resolve, 60));
+            }
+          } else if (printerSettings.graphicsProtocol === "esc_asterisk") {
             if (printerSettings.bleStripeMode === "stripes") {
               // Slices into compatible 24px columns
               const stripes = convertCanvasToEscPosBitImageStripes(canvas);
@@ -1146,7 +1304,13 @@ export default function App() {
           printerSettings.footerText,
           pixelWidth
         );
-        if (printerSettings.graphicsProtocol === "esc_asterisk") {
+        if (printerSettings.graphicsProtocol === "esc_asterisk_8") {
+          const stripes = convertCanvasToEscPosBitImage8Dot(canvas);
+          for (let i = 0; i < stripes.length; i++) {
+            await transmitBluetoothData(stripes[i]);
+            await new Promise(resolve => setTimeout(resolve, 60));
+          }
+        } else if (printerSettings.graphicsProtocol === "esc_asterisk") {
           if (printerSettings.bleStripeMode === "stripes") {
             const stripes = convertCanvasToEscPosBitImageStripes(canvas);
             for (let i = 0; i < stripes.length; i++) {
@@ -2182,38 +2346,38 @@ export default function App() {
                             bleChunkSize: 20,
                             bleDelayMs: 35,
                             bleStripeMode: "stripes",
-                            bleStripeHeight: 16,
-                            graphicsProtocol: "esc_asterisk",
+                            bleStripeHeight: 8,
+                            graphicsProtocol: "esc_asterisk_8",
                             hasCutter: false
                           }))}
                           className={`py-1.5 px-1 rounded-xl border text-[9px] font-bold transition-all text-center leading-tight ${
-                            (printerSettings.bleChunkSize === 20 && printerSettings.bleDelayMs === 35 && printerSettings.bleStripeMode === "stripes" && printerSettings.bleStripeHeight === 16 && printerSettings.graphicsProtocol === "esc_asterisk")
+                            (printerSettings.bleChunkSize === 20 && printerSettings.bleDelayMs === 35 && printerSettings.bleStripeMode === "stripes" && printerSettings.graphicsProtocol === "esc_asterisk_8")
                               ? "border-emerald-600 bg-emerald-50 text-emerald-800 shadow-xs"
                               : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
                           }`}
                         >
                           🛡️ أمان فائق (مستحسن)
-                          <span className="block text-[7px] text-slate-400 font-normal">Slices 16px / ESC* / 20B / 35ms</span>
+                          <span className="block text-[7px] text-slate-400 font-normal">Slices 8px / ESC*1 / 20B / 35ms</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => setPrinterSettings(prev => ({
                             ...prev,
                             bleChunkSize: 40,
-                            bleDelayMs: 25,
+                            bleDelayMs: 20,
                             bleStripeMode: "stripes",
-                            bleStripeHeight: 32,
+                            bleStripeHeight: 24,
                             graphicsProtocol: "esc_asterisk",
                             hasCutter: false
                           }))}
                           className={`py-1.5 px-1 rounded-xl border text-[9px] font-bold transition-all text-center leading-tight ${
-                            (printerSettings.bleChunkSize === 40 && printerSettings.bleDelayMs === 25 && printerSettings.bleStripeMode === "stripes" && printerSettings.bleStripeHeight === 32 && printerSettings.graphicsProtocol === "esc_asterisk")
+                            (printerSettings.bleChunkSize === 40 && printerSettings.bleDelayMs === 20 && printerSettings.bleStripeMode === "stripes" && printerSettings.graphicsProtocol === "esc_asterisk")
                               ? "border-brand-600 bg-brand-50 text-brand-800 shadow-xs"
                               : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
                           }`}
                         >
                           ⚡ متوازن
-                          <span className="block text-[7px] text-slate-400 font-normal">Slices 32px / ESC* / 40B / 25ms</span>
+                          <span className="block text-[7px] text-slate-400 font-normal">Slices 24px / ESC*33 / 40B / 20ms</span>
                         </button>
                         <button
                           type="button"
@@ -2244,11 +2408,12 @@ export default function App() {
                       <div>
                         <label className="text-[9px] font-bold text-slate-400 block mb-1">بروتوكول معالجة الرسوميات (Graphics Protocol)</label>
                         <select
-                          value={printerSettings.graphicsProtocol || "esc_asterisk"}
-                          onChange={(e) => setPrinterSettings(prev => ({ ...prev, graphicsProtocol: e.target.value as "gs_v_0" | "esc_asterisk" }))}
+                          value={printerSettings.graphicsProtocol || "esc_asterisk_8"}
+                          onChange={(e) => setPrinterSettings(prev => ({ ...prev, graphicsProtocol: e.target.value as "gs_v_0" | "esc_asterisk" | "esc_asterisk_8" }))}
                           className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[10px] text-slate-700 outline-hidden font-bold"
                         >
-                          <option value="esc_asterisk">نمط الصور التقليدي (ESC * 33) ✦ متوافق 100% مع الطابعات المحمولة الاقتصادية</option>
+                          <option value="esc_asterisk_8">نمط الصور الاقتصادي الفائق (ESC * 1) ✦ التوافق المطلق للطابعات الصغيرة (أمان فائق)</option>
+                          <option value="esc_asterisk">نمط الصور التقليدي عالي الدقة (ESC * 33) - متوافق ودقيق</option>
                           <option value="gs_v_0">نمط الرسوميات السريع (GS v 0) - مخصص للطابعات المكتبية الاحترافية الكبيرة</option>
                         </select>
                       </div>
@@ -2369,6 +2534,28 @@ export default function App() {
                         }`} />
                       </button>
                     </div>
+                  </div>
+
+                  {/* Informational Guidance Alert Box about Background Execution & Device Restrictions */}
+                  <div className="bg-brand-50/60 border border-brand-100 rounded-2xl p-3.5 space-y-2 text-right">
+                    <div className="flex items-center gap-1.5 text-brand-900 font-bold text-[11px]">
+                      <span className="text-sm">💡</span>
+                      <span>توضيح هام حول الطباعة التلقائية وقفل الهاتف:</span>
+                    </div>
+                    <p className="text-[10px] text-brand-800 leading-relaxed font-medium">
+                      لأنظمة الهواتف الذكية (أندرويد وآيفون) قيود حماية صارمة **توقف عمل البلوتوث والمؤقتات بالكامل** بمجرد انطفاء الشاشة لحفظ طاقة البطارية. لضمان أفضل تجربة:
+                    </p>
+                    <ul className="text-[9.5px] text-brand-800/95 space-y-1.5 list-disc list-inside leading-relaxed pr-1">
+                      <li>
+                        <strong>رادار الحفاظ على النشاط (بالأسفل):</strong> يرسل ذبذبات صامتة تمنع نظام الهاتف من تجميد التطبيق حتى والشاشة مغلقة.
+                      </li>
+                      <li>
+                        <strong>منع خمول الشاشة (بالأسفل):</strong> يحافظ على الشاشة مضيئة طوال اليوم (ممتاز عند وضع الهاتف بجانب الطابعة).
+                      </li>
+                      <li>
+                        <strong>التدارك التلقائي الفاخر (نشط الآن ✦):</strong> إذا كان الهاتف مغلقاً ونشطته لاحقاً، **سيقوم النظام فوراً بطباعة أي مهمة بدأت خلال الـ 60 دقيقة الماضية** حتى لا تفوتك أي مهمة!
+                      </li>
+                    </ul>
                   </div>
 
                   {/* Test print trigger */}
